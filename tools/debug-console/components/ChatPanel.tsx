@@ -12,6 +12,7 @@ import type { FlowNodeData } from "@/lib/build-flow-graph";
 import type { QueryMode } from "@/lib/default-system-prompt";
 import { FlowGraph } from "./FlowGraph";
 import { useT } from "@/lib/i18n-client";
+import type { MemoryCandidate } from "@/lib/memory-candidate";
 
 interface Props {
   provider: string;
@@ -21,6 +22,8 @@ interface Props {
   mode: QueryMode;
   /** 要查询的 workspace（自动识别得来）；null = 让 web 用默认库 */
   workspace: string | null;
+  /** 可选：在本轮请求前预加载的项目 Context Pack */
+  projectId: string | null;
   onOpenRef: (ref: WikiRef) => void;
   onOpenNode: (node: FlowNodeData) => void;
 }
@@ -62,6 +65,7 @@ export function ChatPanel({
   toolBudget,
   mode,
   workspace,
+  projectId,
   onOpenRef,
   onOpenNode,
 }: Props) {
@@ -114,6 +118,33 @@ export function ChatPanel({
     stickToBottomRef.current = true;
     setShowJumpToBottom(false);
   }, []);
+
+  const saveMemoryCandidate = useCallback(
+    async (candidate: MemoryCandidate) => {
+      try {
+        const res = await fetch("/api/memory", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "save_candidate",
+            user_confirmed: true,
+            workspace: workspace || undefined,
+            proposal: {
+              title: candidate.title,
+              content: candidate.content,
+              scope: candidate.scope,
+              confidence: candidate.confidence,
+            },
+          }),
+        });
+        const data = (await res.json()) as { ok?: boolean; path?: string; error?: string };
+        return { ok: res.ok && data.ok === true, path: data.path, error: data.error };
+      } catch {
+        return { ok: false, error: "network_error" };
+      }
+    },
+    [workspace],
+  );
 
   const applyEvent = useCallback((assistantId: string, evt: IncomingEvent) => {
     setMessages((prev) => {
@@ -220,6 +251,7 @@ export function ChatPanel({
       role: "assistant",
       parts: [],
       streaming: true,
+      memoryOptOut: text.includes("#no-memory"),
     };
 
     // 新一轮开始：用户主动发送，重新黏底，让本轮内容滚入视野。
@@ -257,6 +289,8 @@ export function ChatPanel({
           tool_budget: toolBudget,
           mode,
           workspace: workspace || undefined,
+          project_id: projectId || undefined,
+          memory_opt_out: text.includes("#no-memory"),
         }),
         signal: ctrl.signal,
       });
@@ -331,6 +365,7 @@ export function ChatPanel({
     toolBudget,
     mode,
     workspace,
+    projectId,
   ]);
 
   const onKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -418,6 +453,7 @@ export function ChatPanel({
                       : 0
                 }
                 onOpenRef={onOpenRef}
+                onSaveMemoryCandidate={saveMemoryCandidate}
               />
             ))}
           </div>

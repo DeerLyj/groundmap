@@ -16,6 +16,89 @@ from conftest import write_md, standard_fm
 
 
 # ============================================================
+# search
+# ============================================================
+
+class TestSearch:
+    def test_search_loader_includes_derived_without_changing_wiki_loader(self, fake_kb):
+        write_md(
+            fake_kb / "wiki" / "concepts" / "known.md",
+            standard_fm(title="Known"),
+            "wiki body",
+        )
+        derived = fake_kb / "derived" / "papers" / "source.md"
+        derived.parent.mkdir(parents=True)
+        derived.write_text("# Source\n\nderived body\n", encoding="utf-8")
+
+        assert {page.path for page in k.load_all_wiki_pages()} == {
+            "wiki/concepts/known.md"
+        }
+        assert {page.path for page in k.load_search_pages()} == {
+            "wiki/concepts/known.md",
+            "derived/papers/source.md",
+        }
+
+    def test_chinese_query_uses_bigrams_and_keeps_result_schema(self, fake_kb):
+        target = fake_kb / "derived" / "papers" / "ground-station.md"
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            "# Ground Station\n\n中孟海洋遥感卫星地面站由两家机构共同建设。\n",
+            encoding="utf-8",
+        )
+        decoy = fake_kb / "derived" / "papers" / "long-decoy.md"
+        decoy.write_text("地面站" * 100, encoding="utf-8")
+
+        results = k.search_pages(
+            "地面站由哪些机构共建？",
+            k.load_search_pages(),
+            limit=5,
+        )
+
+        assert results[0]["path"] == "derived/papers/ground-station.md"
+        assert set(results[0]) == {
+            "path", "title", "type", "status", "score", "snippet"
+        }
+
+    def test_ascii_query_keeps_space_split_behavior(self):
+        assert k._search_terms("alpha beta") == ["alpha", "beta"]
+
+    def test_chinese_search_gives_derived_body_evidence_double_weight(self):
+        wiki = k.Page(
+            "wiki/concepts/a.md", "A", "concept", "draft", "medium", "", "LLM",
+            [], [], 0, "卫星地面站",
+        )
+        derived = k.Page(
+            "derived/a.md", "A", "unknown", "draft", "medium", "", "unknown",
+            [], [], 0, "卫星地面站",
+        )
+
+        results = k.search_pages("卫星地面站", [wiki, derived])
+
+        assert results[0]["path"] == "derived/a.md"
+        assert results[0]["score"] == results[1]["score"] * 2
+
+    def test_search_ignores_generated_embedded_media_catalog(self):
+        page = k.Page(
+            "derived/a.md", "A", "unknown", "draft", "medium", "", "unknown",
+            [], [], 0,
+            "正文\n<!-- groundmap:embedded-media:start -->\n图片 3 四个面板\n"
+            "<!-- groundmap:embedded-media:end -->",
+        )
+
+        assert k.search_pages("图片 3 四个面板", [page]) == []
+
+    def test_search_ignores_parent_embedded_ocr_catalog(self):
+        page = k.Page(
+            "derived/a.md", "A", "unknown", "draft", "medium", "", "unknown",
+            [], [], 0,
+            "正文\n<!-- groundmap:embedded-ocr:start -->\n图片 3 四个面板\n"
+            "<!-- groundmap:embedded-ocr:end -->",
+        )
+
+        assert k.search_pages("图片 3 四个面板", [page]) == []
+
+
+# ============================================================
 # mask_code_spans
 # ============================================================
 
@@ -69,6 +152,16 @@ class TestNormalizeLinkTarget:
 
     def test_strips_whitespace(self):
         assert k.normalize_link_target("  wiki/foo  ") == "wiki/foo.md"
+
+    def test_source_entry_keeps_existing_raw_binary_extension(self, fake_kb):
+        source = fake_kb / "raw" / "test" / "meeting.mp3"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"audio")
+
+        assert k._resolve_source_entry("[[raw/test/meeting.mp3]]") == (
+            True,
+            "raw/test/meeting.mp3",
+        )
 
 
 # ============================================================
@@ -359,6 +452,21 @@ class TestValidateFrontmatter:
         assert result["errors"] == []
         # warnings 字段应存在（可空）
         assert "warnings" in result
+
+    def test_valid_memory_page(self, fake_kb):
+        path = fake_kb / "wiki" / "memory" / "confirmed.md"
+        write_md(
+            path,
+            standard_fm(
+                type="memory",
+                status="reviewed",
+                last_modified_by="Human",
+                tags=["memory-confirmed"],
+            ),
+            "# 已确认偏好\n\n偏好结构化输出。\n",
+        )
+        result = k.validate_frontmatter(path)
+        assert result["valid"] is True
 
     def test_missing_required_field(self, fake_kb):
         path = fake_kb / "wiki" / "concepts" / "bad.md"

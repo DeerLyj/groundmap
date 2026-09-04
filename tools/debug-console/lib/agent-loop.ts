@@ -38,6 +38,8 @@ export interface AgentRunInput {
   toolBudget?: number;
   signal?: AbortSignal;
   mode?: QueryMode;
+  /** 系统 prompt 中已预加载、可视为本轮已读取的页面。 */
+  preloadedSources?: string[];
 }
 
 const DEFAULT_TOOL_BUDGET = 10;
@@ -82,7 +84,7 @@ export async function* runAgent(
   let forcedAnswerOnce = false;
 
   // 来源注册表：本轮对话中所有成功读取过的文件路径（防幻觉白名单）
-  const availableSources = new Set<string>();
+  const availableSources = new Set<string>(input.preloadedSources ?? []);
 
   /** 从 tool result 提取路径加入注册表 */
   function recordSource(toolName: string, args: Record<string, unknown>, data?: unknown) {

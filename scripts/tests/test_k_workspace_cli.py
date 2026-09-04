@@ -81,6 +81,11 @@ class TestCreateWorkspace:
         # raw/exports/my_thoughts 留 .gitkeep 保结构
         assert (ws / "exports" / ".gitkeep").is_file()
         assert (ws / "my_thoughts" / ".gitkeep").is_file()
+        assert (ws / "wiki" / "memory").is_dir()
+        assert (ws / "wiki" / "memory" / "candidates").is_dir()
+        assert (ws / "wiki" / "memory" / "confirmed.md").is_file()
+        memory_fm = k.validate_frontmatter(ws / "wiki" / "memory" / "confirmed.md")
+        assert memory_fm["valid"], f"脚手架 memory frontmatter 不合规: {memory_fm}"
 
     def test_root_index_frontmatter_valid(self, tmp_path, monkeypatch):
         monkeypatch.setattr(k, "DATA_ROOT", tmp_path)
@@ -110,3 +115,19 @@ class TestCreateWorkspace:
         result = k.create_workspace("main")
         assert (tmp_path / "fresh-project" / "workspaces" / "main" / "wiki").is_dir()
         assert result["name"] == "main"
+
+    def test_obsidian_report_uses_workspace_as_vault(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(k, "DATA_ROOT", tmp_path)
+        k.create_workspace("personal-ai-os")
+        ws = tmp_path / "workspaces" / "personal-ai-os"
+        monkeypatch.setattr(k, "PROJECT_ROOT", ws)
+        monkeypatch.setattr(k, "WIKI_DIR", ws / "wiki")
+        monkeypatch.setattr(k, "RAW_DIR", ws / "raw")
+
+        report = k.obsidian_integration_report([])
+
+        assert report["ok"] is True
+        assert report["vault_path"] == str(ws)
+        assert report["required_dirs"]["wiki"] is True
+        assert report["required_files"]["wiki/root_index.md"] is True
+        assert report["root_index_uri"].startswith("obsidian://open?path=")

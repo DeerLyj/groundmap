@@ -24,8 +24,8 @@
   --vermilion: #ff5e3a;     /* 错误 */
   --azure: #6ab8ff;         /* 信息 / wiki 链接（次级） */
 
-  --font-display: var(--font-display, "Fraunces"), Georgia, serif;
-  --font-mono: var(--font-mono, "JetBrains Mono"), ui-monospace, "SF Mono",
+  --font-display: "Fraunces", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono",
     Menlo, Consolas, "Liberation Mono", monospace;
 }
 

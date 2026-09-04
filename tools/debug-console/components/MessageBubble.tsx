@@ -6,12 +6,17 @@
  * - 流式时光标改 amber 方块
  * - 参考列表改印刷脚注 (numbered, mono, hairline rule)
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ToolCallCard, type ToolCallVizData } from "./ToolCallCard";
 import { useLocale, useT } from "@/lib/i18n-client";
 import type { TranslationKey } from "@/lib/i18n";
+import {
+  extractMemoryCandidates,
+  stripMemoryCandidateBlocks,
+  type MemoryCandidate,
+} from "@/lib/memory-candidate";
 import {
   collectRefs,
   downgradeRefAnchors,
@@ -33,6 +38,7 @@ export interface UIMessage {
   role: "user" | "assistant" | "system" | "error";
   parts: MessagePart[];
   streaming?: boolean;
+  memoryOptOut?: boolean;
   end_reason?: string;
   end_error?: string;
   status?: { text: string; level?: "info" | "warn" };
@@ -90,13 +96,18 @@ export function MessageBubble({
   msg,
   index,
   onOpenRef,
+  onSaveMemoryCandidate,
 }: {
   msg: UIMessage;
   index?: number;
   onOpenRef: (ref: WikiRef) => void;
+  onSaveMemoryCandidate?: (
+    candidate: MemoryCandidate,
+  ) => Promise<{ ok: boolean; path?: string; error?: string }>;
 }) {
   const t = useT();
   const { locale } = useLocale();
+  const [candidateStates, setCandidateStates] = useState<MemoryCandidate[]>([]);
   const isUser = msg.role === "user";
   const isError = msg.role === "error";
   const isAssistant = msg.role === "assistant";
@@ -124,13 +135,35 @@ export function MessageBubble({
   const numberedRefs = useMemo(() => {
     const texts = msg.parts
       .filter((p): p is { kind: "text"; text: string } => p.kind === "text")
-      .map((p) => cleanRefs(p.text));
+      .map((p) => stripMemoryCandidateBlocks(cleanRefs(p.text)));
     return collectRefs(texts);
   }, [msg.parts, cleanRefs]);
   const refMap = useMemo(
     () => new Map(numberedRefs.map((r) => [r.key, r.n])),
     [numberedRefs],
   );
+
+  const answerText = useMemo(
+    () =>
+      msg.parts
+        .filter((p): p is { kind: "text"; text: string } => p.kind === "text")
+        .map((p) => p.text)
+        .join("\n"),
+    [msg.parts],
+  );
+  const candidates = useMemo(
+    () =>
+      msg.streaming || msg.memoryOptOut || !isAssistant
+        ? []
+        : extractMemoryCandidates(answerText),
+    [answerText, isAssistant, msg.memoryOptOut, msg.streaming],
+  );
+
+  useEffect(() => {
+    setCandidateStates((previous) =>
+      candidates.map((candidate, index) => previous[index] || candidate),
+    );
+  }, [candidates]);
 
   const seq = String(index ?? 1).padStart(2, "0");
 
@@ -222,7 +255,7 @@ export function MessageBubble({
                   },
                 }}
               >
-                {inlineWikiRefsNumbered(cleanRefs(part.text), refMap)}
+                {inlineWikiRefsNumbered(stripMemoryCandidateBlocks(cleanRefs(part.text)), refMap)}
               </ReactMarkdown>
             </div>
           );
@@ -271,6 +304,45 @@ export function MessageBubble({
               </li>
             ))}
           </ol>
+        </div>
+      )}
+
+      {isAssistant && candidateStates.length > 0 && (
+        <div className="mt-4 max-w-[68ch] space-y-2 border-l-2 border-[var(--amber)] pl-3">
+          <div className="k-eyebrow text-[var(--amber)]">{t("memory.candidate_title")}</div>
+          {candidateStates.map((candidate, candidateIndex) => (
+            <MemoryCandidateCard
+              key={`${candidate.title}-${candidateIndex}`}
+              candidate={candidate}
+              t={t}
+              onSave={
+                onSaveMemoryCandidate
+                  ? async () => {
+                      const result = await onSaveMemoryCandidate(candidate);
+                      setCandidateStates((previous) =>
+                        previous.map((item, index) =>
+                          index === candidateIndex
+                            ? {
+                                ...item,
+                                state: result.ok ? "saved" : item.state,
+                                path: result.path,
+                                error: result.error,
+                              }
+                            : item,
+                        ),
+                      );
+                    }
+                  : undefined
+              }
+              onIgnore={() =>
+                setCandidateStates((previous) =>
+                  previous.map((item, index) =>
+                    index === candidateIndex ? { ...item, state: "ignored" } : item,
+                  ),
+                )
+              }
+            />
+          ))}
         </div>
       )}
 
@@ -338,6 +410,51 @@ export function MessageBubble({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function MemoryCandidateCard({
+  candidate,
+  t,
+  onSave,
+  onIgnore,
+}: {
+  candidate: MemoryCandidate;
+  t: ReturnType<typeof useT>;
+  onSave?: () => Promise<void>;
+  onIgnore: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const isDone = candidate.state !== "new";
+  async function save() {
+    if (!onSave || busy || isDone) return;
+    setBusy(true);
+    await onSave();
+    setBusy(false);
+  }
+  return (
+    <div className="border border-[var(--line)] bg-[var(--ink-2)]/50 p-3 text-[12px]">
+      <div className="font-semibold text-[var(--paper)]">{candidate.title}</div>
+      <div className="mt-1 whitespace-pre-wrap text-[var(--paper-dim)]">{candidate.content}</div>
+      <div className="mt-2 font-mono text-[10.5px] text-[var(--paper-mute)]">
+        {t("memory.scope", { scope: candidate.scope })} · {t("memory.confidence", { confidence: candidate.confidence })}
+      </div>
+      <div className="mt-3 flex items-center gap-2">
+        {candidate.state === "new" && onSave && (
+          <button onClick={save} disabled={busy} className="k-btn k-btn-primary">
+            {busy ? t("memory.saving") : t("memory.save_candidate")}
+          </button>
+        )}
+        {candidate.state === "new" && (
+          <button onClick={onIgnore} disabled={busy} className="k-btn">
+            {t("memory.ignore")}
+          </button>
+        )}
+        {candidate.state === "saved" && <span className="text-[var(--amber)]">{t("memory.saved")}</span>}
+        {candidate.state === "ignored" && <span className="text-[var(--paper-mute)]">{t("memory.ignored")}</span>}
+        {candidate.error && <span className="text-[var(--vermilion)]">{t("memory.save_failed")}</span>}
+      </div>
     </div>
   );
 }

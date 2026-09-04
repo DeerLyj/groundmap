@@ -22,7 +22,7 @@ interface TreeData {
   flat: PageNode[];
 }
 
-const TYPE_ORDER = ["index", "entity", "concept", "source_summary", "analysis", "comparison", "raw_source", "unknown"];
+const TYPE_ORDER = ["index", "entity", "concept", "source_summary", "analysis", "comparison", "memory", "raw_source", "unknown"];
 
 function statusVariant(status: string): "default" | "secondary" | "warning" | "success" | "destructive" {
   switch (status) {

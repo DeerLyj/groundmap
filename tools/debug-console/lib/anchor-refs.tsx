@@ -2,7 +2,7 @@
 /**
  * 论文样式段落引用系统（移植自 web/lib/anchor-refs.tsx）
  *
- * 把 markdown 里的 trailing anchor (`^h-/^p-/^t-/^c-/^f-`) + raw wikilink (`[[raw/...]]`)
+ * 把 markdown 里的 trailing anchor (`^h-/^p-/^t-/^c-/^f-`) + 来源 wikilink (`[[raw/...]]` / `[[derived/...]]`)
  * 按出现顺序**统一编号 [1][2][3]**，渲染时变成 [n] 上标，文末出 References 区。
  *
  * 与主 web/ 端的视觉风格 100% 一致。
@@ -24,7 +24,7 @@ const LINE_ANCHOR_RE =
   /^(.*?)[ \t]+\^([hpcft]-\d+(?:-\d+)?-[a-z0-9]+(?:-\d+)?)[ \t]*$/gm;
 
 const RAW_WIKILINK_RE =
-  /\[\[(raw\/[^\]|#]+?)(?:#(\^?[^\]|]+))?(?:\|[^\]]+)?\]\]/g;
+  /\[\[((?:raw|derived)\/[^\]|#]+?)(?:#(\^?[^\]|]+))?(?:\|[^\]]+)?\]\]/g;
 
 export type RefKind = "h" | "p" | "t" | "c" | "f" | "raw";
 

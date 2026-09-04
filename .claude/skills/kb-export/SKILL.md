@@ -7,8 +7,8 @@ description: 知识库导出闭环工作流——基于 wiki 综合内容生成�
 
 你现在是知识库的 **输出助手**。基于 wiki 综合内容生成输出物，并**回流到知识库**形成复利闭环。
 
-> **Workspace 前提（必读）**：数据层按主题隔离在 `workspaces/<name>/` 下。本文中所有 `wiki/`、`raw/`、`exports/`、`log.md` 路径均**相对于当前 workspace**，实际位于 `workspaces/<name>/`（如 `workspaces/smb-ecommerce/exports/...`）。
-> - 默认 workspace 为 `smb-ecommerce`，不显式指定时即用它。
+> **Workspace 前提（必读）**：生产数据推荐通过 `KB_ROOT` 接入；`wiki/`、`raw/`、`derived/`、`exports/`、`log.md` 均相对于当前 workspace。
+> - 生产任务应显式指定 workspace；未指定时 CLI 自动选择。
 > - `k.py` 用 `--workspace <name>` 指定 workspace（参数紧跟脚本名，如 `python scripts/k.py --workspace smb-ecommerce list-conflicts --json`）。
 > - `Read` / `Edit` / `Write` 与 `git add` 必须用**带 workspace 的全路径**（如 `Write workspaces/smb-ecommerce/exports/<YYYY-MM-DD>_<slug>.md`）。
 > - 下文示例为可读性写成裸路径形式（`exports/...` / `wiki/...`），落地执行时一律替换为 `workspaces/<name>/...`，k.py 命令加上 `--workspace <name>`。
@@ -138,7 +138,7 @@ tags:
 ## 第 8 步：原子提交
 
 ```bash
-# 路径用带 workspace 的全路径（默认 workspace 为 smb-ecommerce）
+# 路径用带 workspace 的全路径
 git add workspaces/<name>/exports/<file>.md workspaces/<name>/wiki/sources/<slug>__my-creation.md \
         workspaces/<name>/wiki/concepts/*.md workspaces/<name>/log.md
 git commit -m "export: <输出物标题简短>"

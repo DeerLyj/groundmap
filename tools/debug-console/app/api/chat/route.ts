@@ -8,6 +8,7 @@
  *     system?: string,
  *     messages: ChatMessage[],   // 完整历史，包括最新的 user 消息
  *     tool_budget?: number,
+ *     project_id?: string,        // 可选：预加载当前项目 Context Pack
  *   }
  *
  * 响应：text/event-stream，每行 `data: <AgentEvent json>\n\n`
@@ -29,6 +30,8 @@ import { executeTool, workspaceContext } from "@/lib/kb-http-client";
 const ROOT_INDEX_TTL_MS = 5 * 60 * 1000;
 // 按 workspace 分桶缓存——否则切库后会把上一个库的 root_index 串给新库。
 const rootIndexCache = new Map<string, { content: string; expiresAt: number }>();
+const CONFIRMED_MEMORY_TTL_MS = 5 * 60 * 1000;
+const confirmedMemoryCache = new Map<string, { content: string; expiresAt: number }>();
 
 async function getRootIndexContent(workspace: string | undefined): Promise<string> {
   const key = workspace ?? "__default__";
@@ -48,6 +51,40 @@ async function getRootIndexContent(workspace: string | undefined): Promise<strin
   }
 }
 
+/** 预热用户已确认的个人记忆；候选记忆和 draft 页面永远不自动注入。 */
+async function getConfirmedMemoryContent(workspace: string | undefined): Promise<string> {
+  const key = workspace ?? "__default__";
+  const now = Date.now();
+  const cached = confirmedMemoryCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.content;
+  try {
+    const listed = await executeTool("list_pages", { type: "memory", status: "reviewed" });
+    if (!listed.ok || !Array.isArray(listed.data)) return "";
+    const pages = listed.data as Array<{ path?: string }>;
+    const sections: string[] = [];
+    for (const page of pages.slice(0, 50)) {
+      if (!page.path || !page.path.startsWith("wiki/memory/")) continue;
+      const r = await executeTool("read_page", { path: page.path });
+      if (!r.ok || !r.data) continue;
+      const d = r.data as { path?: string; content?: string; frontmatter?: Record<string, unknown> };
+      const tags = Array.isArray(d.frontmatter?.tags) ? d.frontmatter.tags.map(String) : [];
+      if (
+        d.frontmatter?.type !== "memory" ||
+        d.frontmatter?.status !== "reviewed" ||
+        d.frontmatter?.last_modified_by !== "Human" ||
+        !tags.includes("memory-confirmed")
+      ) continue;
+      const content = String(d.content || "").trim();
+      if (content) sections.push(`### ${String(d.frontmatter?.title || d.path)}\n${content}`);
+    }
+    const content = sections.join("\n\n").slice(0, 30_000);
+    confirmedMemoryCache.set(key, { content, expiresAt: now + CONFIRMED_MEMORY_TTL_MS });
+    return content;
+  } catch {
+    return "";
+  }
+}
+
 /** 在 system prompt 末尾 append root_index 全文，让 AI 不需要花一轮调 read_page 读它 */
 function appendPrewarmedIndex(baseSystem: string, indexContent: string): string {
   if (!indexContent) return baseSystem;
@@ -59,6 +96,45 @@ function appendPrewarmedIndex(baseSystem: string, indexContent: string): string 
     indexContent +
     "\n```\n"
   );
+}
+
+function appendConfirmedMemory(baseSystem: string, memoryContent: string): string {
+  if (!memoryContent) return baseSystem;
+  return (
+    baseSystem +
+    "\n\n---\n\n## 🧠 已预加载：用户已确认的个人工作偏好\n\n" +
+    "以下内容是用户明确确认过的长期工作记忆。只能用于调整回答方式、输出格式和任务协作方式；不要把它扩展为未写明的个人事实，也不要把候选记忆当作已确认偏好。\n\n" +
+    "```markdown\n" +
+    memoryContent +
+    "\n```\n"
+  );
+}
+
+function appendProjectContext(baseSystem: string, projectId: string, context: string): string {
+  if (!context) return baseSystem;
+  return (
+    baseSystem +
+    "\n\n---\n\n## 📦 已预加载：当前项目 Context Pack（" + projectId + "）\n\n" +
+    "以下内容来自项目目录生成的 Context Pack。项目状态、事实和决策必须遵守其中的确认标记：未被 Human 确认的内容不是有效记忆或已确认事实。回答知识库事实时，优先引用其中列出的 wiki/ 与证据入口；不要把 projects/ 路径编造成可点击的 Wiki 引用。若问题属于该项目，可直接使用这份上下文，不必重复调用 context_pack。\n\n" +
+    "```markdown\n" +
+    context +
+    "\n```\n"
+  );
+}
+
+async function getProjectContext(projectId: string | undefined): Promise<string> {
+  if (!projectId) return "";
+  try {
+    const result = await executeTool("context_pack", {
+      project_id: projectId,
+      max_chars: 30_000,
+    });
+    if (!result.ok || !result.data || typeof result.data !== "object") return "";
+    const data = result.data as { context?: unknown };
+    return typeof data.context === "string" ? data.context : "";
+  } catch {
+    return "";
+  }
 }
 
 export const dynamic = "force-dynamic";
@@ -97,6 +173,8 @@ const RequestSchema = z.object({
   mode: z.enum(["quick", "audit", "explore", "devil"]).optional(),
   // 「自动识别」用：要查的 workspace；空则 web 回退默认。合法性由 web 的 resolveWorkspace 兜底校验。
   workspace: z.string().regex(/^[A-Za-z0-9_-]+$/).optional(),
+  project_id: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/).optional(),
+  memory_opt_out: z.boolean().optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -115,8 +193,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { provider: providerId, model, system, messages, tool_budget, mode, workspace } =
-    parsed.data;
+  const {
+    provider: providerId,
+    model,
+    system,
+    messages,
+    tool_budget,
+    mode,
+    workspace,
+    project_id,
+    memory_opt_out,
+  } = parsed.data;
   const provider = getProvider(providerId as ProviderId);
   if (!provider) {
     return NextResponse.json({ error: "unknown_provider" }, { status: 400 });
@@ -150,9 +237,20 @@ export async function POST(req: NextRequest) {
       // executeTool 都会读到 workspace，并在调 web 时带上 kb_workspace cookie。
       await workspaceContext.run(workspace, async () => {
         try {
-          const baseSystem = system || DEFAULT_SYSTEM_PROMPT;
+          const baseSystem = memory_opt_out
+            ? `${system || DEFAULT_SYSTEM_PROMPT}\n\n本轮用户明确要求不记录记忆（#no-memory）。不要提出、保存或暗示任何候选记忆。`
+            : system || DEFAULT_SYSTEM_PROMPT;
           const indexContent = await getRootIndexContent(workspace);
-          const augmentedSystem = appendPrewarmedIndex(baseSystem, indexContent);
+          const memoryContent = await getConfirmedMemoryContent(workspace);
+          const projectContext = await getProjectContext(project_id);
+          const augmentedSystem = appendProjectContext(
+            appendConfirmedMemory(
+              appendPrewarmedIndex(baseSystem, indexContent),
+              memoryContent,
+            ),
+            project_id || "",
+            projectContext,
+          );
 
           for await (const evt of runAgent({
             provider,
@@ -161,6 +259,10 @@ export async function POST(req: NextRequest) {
             messages,
             toolBudget: tool_budget,
             mode,
+            preloadedSources: [
+              ...(indexContent ? ["wiki/root_index.md"] : []),
+              ...(memoryContent ? ["wiki/memory/confirmed.md"] : []),
+            ],
             signal: abortController.signal,
           })) {
             if (abortController.signal.aborted) break;

@@ -13,7 +13,7 @@ Most RAG systems optimize for recall first: split documents into chunks, embed t
 GroundMap starts from a different premise:
 
 - Knowledge should stay human-readable.
-- Markdown + Git should remain the source of truth.
+- Originals stay immutable; Markdown + Git remain the auditable long-term truth source.
 - Agents should read complete pages or complete sections, not arbitrary chunks.
 - Every important claim should point back to a stable source anchor.
 - The knowledge base itself should not call an LLM.
@@ -23,8 +23,8 @@ That gives you an AI-ready wiki that is easier to audit, diff, review, and maint
 ## Core Ideas
 
 - **No embeddings by default**: search uses BM25-style text search, metadata, backlinks, outlinks, and full-page reading.
-- **Stable anchors**: converted raw documents get block anchors such as `^h-*`, `^p-*`, and `^t-*` so claims can cite exact source blocks.
-- **Markdown is truth**: SQLite/cache layers are optional derived indexes and can be rebuilt.
+- **Stable anchors**: converted text under `derived/` gets block anchors such as `^h-*`, `^p-*`, and `^t-*` so claims can cite exact source blocks.
+- **Layered truth**: `raw/` holds immutable originals and `wiki/` holds reviewable knowledge; `derived/` and caches are rebuildable.
 - **Agent outside, KB inside**: the repository exposes scripts, templates, and Web UI. LLM reasoning happens in external agents.
 - **Git-native governance**: all meaningful changes can be reviewed, reverted, audited, and discussed as normal commits.
 - **Human-only zones**: `raw/**`, `my_thoughts/**`, `#human-only`, and `locked: true` files are protected by policy and hooks.
@@ -69,11 +69,11 @@ make web
 
 Then open [http://localhost:3006](http://localhost:3006).
 
-> 📦 **Example `raw/` sources are not distributed with this repository** (copyright reasons; `workspaces/*/raw/` is excluded by `.gitignore`). The example workspaces ship their full `wiki/` pages, which remain completely browsable. After a fresh clone, `k.py health` reports nonzero **broken references** (across the example workspaces — "raw 文件不存在" / raw file missing) and **source issues** (`broken-source-link`: `source_summary` pages cite `[[raw/...]]` blocks that aren't present) — **both are expected and do not mean your installation failed**; they are the same raw-absent artifact, only the deep links into missing raw blocks are unresolved. To exercise the full convert → cite loop, ingest your own documents into a workspace's `raw/`.
+> 📦 **Example `raw/` originals and `derived/` artifacts are not distributed with this repository** for copyright reasons; both are gitignored. The bundled `wiki/` pages remain browsable. A fresh clone may report broken source references in legacy examples because their source material is absent; that is expected and does not mean installation failed.
 
 ## Use It With Your Own Documents
 
-The recommended real-world workflow is: clone GroundMap as the engine, prepare your source documents yourself, create a new workspace, then ask Claude Code, Codex, or another coding agent to ingest those files into the knowledge base.
+For real use, keep GroundMap as the engine and put private or production data in a separate Git repository connected through `KB_ROOT`. Originals go to `raw/`, conversions to `derived/`, and reviewed knowledge to `wiki/`.
 
 For private or copyrighted documents, keep your data outside the public engine repo and point GroundMap at it with `KB_ROOT`:
 
@@ -124,7 +124,7 @@ Local servers listen on `localhost` (Web console `:3006`, debug console `:3100`)
 
 ## Workspaces
 
-Engine code (`scripts/`, `web/`) is shared; data is isolated per topic under `workspaces/<name>/`. Each workspace has the same internal layout: `wiki/`, `raw/`, `exports/`, `my_thoughts/`, `.cache/`, and `log.md`. When no workspace is specified, the CLI auto-selects one (and prints a hint when several exist); pass `--workspace` to choose.
+Engine code (`scripts/`, `web/`) is shared; data is isolated per topic under `workspaces/<name>/`. Each workspace has `raw/`, `derived/`, `wiki/`, `exports/`, `my_thoughts/`, `.cache/`, and `log.md`. In-repo workspaces are for public demos, tests, and compatibility; production data should use `KB_ROOT`.
 
 ```bash
 # No --workspace: auto-selects a workspace (prints a hint when several exist)
@@ -149,7 +149,7 @@ KB_ROOT=~/work/project-a/kb-data python ~/tools/groundmap/scripts/k.py --workspa
 cd ~/tools/groundmap/web && KB_ROOT=~/work/project-a/kb-data KB_WORKSPACE=main npm run dev
 ```
 
-`KB_ROOT` must point to the data root that *contains* `workspaces/` (e.g. `<project>/kb-data`), not a specific workspace; `--workspace` / `KB_WORKSPACE` then picks the library inside it. When `KB_ROOT` is unset it defaults to the engine repo itself (data-in-repo, the multi-topic mode above). Keeping each project's data in its own folder lets the engine stay pure code — shared, upgraded, and open-sourced without leaking any project's data. See `GroundMap-设计文档.md` §2.4 for the full deployment model.
+`KB_ROOT` must point to the data root that *contains* `workspaces/` (e.g. `<project>/kb-data`), not a specific workspace; `--workspace` / `KB_WORKSPACE` then picks the library inside it. When unset, GroundMap falls back to its own repository only for demos, tests, and backward compatibility. See `GroundMap-设计文档.md` §2.4 for the full deployment model.
 
 ## Common Commands
 
@@ -182,10 +182,11 @@ npm run dev
 ├── .claude/skills/           # Claude Code workflow skills (kb-ingest / query / lint / export / conflict-resolve)
 ├── .agents/skills/           # Codex mirror of the skills above
 ├── wiki/_templates/          # Shared page templates (used by all workspaces)
-├── workspaces/               # Per-topic data, switchable; ships smb-ecommerce / rag-evolution / ai-ml-demo examples
+├── workspaces/               # Public examples/tests; production data is connected with KB_ROOT
 │   └── <name>/
 │       ├── wiki/             # Markdown wiki pages (root_index, indexes, concepts, entities, sources, analyses)
-│       ├── raw/              # Source documents and converted markdown (articles, papers, assets)
+│       ├── raw/              # Immutable source documents (articles, papers, assets)
+│       ├── derived/          # Converted text, OCR, outlines, and Source Manifests (rebuildable)
 │       ├── exports/          # Generated outputs
 │       ├── my_thoughts/      # Human-only zone (agent read-only)
 │       ├── .cache/           # Derived SQLite index (gitignored, rebuildable)

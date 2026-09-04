@@ -84,7 +84,7 @@ const DEFAULT_DIRS = ["wiki"];
 // my_thoughts/ 是人类专属区，agent 只读；web 端**不应该**返回该目录的文件名清单
 // （即使内容不读，路径名本身也是隐私泄漏）。如果将来确实需要 server-side 访问
 // my_thoughts，请走专门的 server-only helper，不通过 listPages。
-const ALLOWED_DIRS = new Set(["wiki", "raw"]);
+const ALLOWED_DIRS = new Set(["wiki", "raw", "derived"]);
 
 function normalizePath(p: string): string {
   return p.replace(/\\/g, "/").replace(/^\.?\/+/, "");
@@ -93,6 +93,7 @@ function normalizePath(p: string): string {
 /** raw/ 与 my_thoughts/ 下的文件用专门的虚拟 type，区别于 wiki schema 的真实 type */
 function fallbackTypeByPath(p: string): string {
   if (p.startsWith("raw/")) return "raw_source";
+  if (p.startsWith("derived/")) return "derived_source";
   if (p.startsWith("my_thoughts/")) return "human_only";
   return "unknown";
 }

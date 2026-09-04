@@ -57,6 +57,9 @@ export const TRANSLATIONS = {
     "picker.agent": " · 智能体",
     "picker.workspace_tip":
       "当前查询的知识库——跟随 web 主页所选的库（由 ?ws 传入），控制台内不可切换",
+    "picker.project": "项目",
+    "picker.project_none": "不预加载项目",
+    "picker.project_tip": "可选：把项目 Context Pack 预加载到下一轮对话",
 
     // ── 查询深度模式说明 ──
     "mode.quick.desc": "单点事实 / 定义 / 时间问 — 5-10 步快速答",
@@ -79,6 +82,15 @@ export const TRANSLATIONS = {
     "chat.send_hint": "⌘ + enter 发送",
     "chat.clear": "清空记录 ⌫",
     "chat.jump_to_latest": "↓ 回到最新",
+    "memory.candidate_title": "AI 提出的候选记忆（待确认）",
+    "memory.scope": "适用范围：{scope}",
+    "memory.confidence": "置信度：{confidence}",
+    "memory.saving": "保存中…",
+    "memory.save_candidate": "保存为候选",
+    "memory.ignore": "忽略",
+    "memory.saved": "已保存候选，请到记忆审核确认",
+    "memory.ignored": "已忽略",
+    "memory.save_failed": "保存失败",
     // 空状态
     "chat.idle": "工作台 · 空闲",
     "chat.empty_pre": "准备好",
@@ -161,6 +173,7 @@ export const TRANSLATIONS = {
     "flow.type_source": "来源",
     "flow.type_entity": "实体",
     "flow.type_index": "索引",
+    "flow.type_memory": "个人记忆",
     "flow.type_raw": "原始",
     "flow.type_thoughts": "思考",
     "flow.type_file": "文件",
@@ -276,6 +289,9 @@ export const TRANSLATIONS = {
     "picker.agent": " · agent",
     "picker.workspace_tip":
       "The knowledge base being queried — follows the workspace selected on the web home (passed via ?ws); not switchable inside the console",
+    "picker.project": "project",
+    "picker.project_none": "no project preload",
+    "picker.project_tip": "Optional: preload a project's Context Pack into the next chat turn",
 
     // ── Query depth modes ──
     "mode.quick.desc":
@@ -300,6 +316,15 @@ export const TRANSLATIONS = {
     "chat.send_hint": "⌘ + enter to send",
     "chat.clear": "clear log ⌫",
     "chat.jump_to_latest": "↓ jump to latest",
+    "memory.candidate_title": "AI memory candidate (needs review)",
+    "memory.scope": "Scope: {scope}",
+    "memory.confidence": "Confidence: {confidence}",
+    "memory.saving": "saving…",
+    "memory.save_candidate": "save candidate",
+    "memory.ignore": "ignore",
+    "memory.saved": "saved; review it in Memory",
+    "memory.ignored": "ignored",
+    "memory.save_failed": "save failed",
     // Empty state
     "chat.idle": "workbench · idle",
     "chat.empty_pre": "ready to",
@@ -384,6 +409,7 @@ export const TRANSLATIONS = {
     "flow.type_source": "source",
     "flow.type_entity": "entity",
     "flow.type_index": "index",
+    "flow.type_memory": "memory",
     "flow.type_raw": "raw",
     "flow.type_thoughts": "thoughts",
     "flow.type_file": "file",

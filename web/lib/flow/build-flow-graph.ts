@@ -50,7 +50,7 @@ export type NodeStatus = "pending" | "ok" | "error";
 
 export type FileType =
   | "concept" | "analysis" | "source" | "entity"
-  | "index" | "raw" | "thoughts" | "unknown";
+  | "index" | "memory" | "raw" | "thoughts" | "unknown";
 
 export interface FlowNodeData {
   key: string;
@@ -222,8 +222,9 @@ function inferFileType(path?: string): FileType {
   if (path.startsWith("wiki/analyses/")) return "analysis";
   if (path.startsWith("wiki/sources/")) return "source";
   if (path.startsWith("wiki/entities/")) return "entity";
+  if (path.startsWith("wiki/memory/")) return "memory";
   if (path.startsWith("wiki/indexes/") || path === "wiki/root_index.md") return "index";
-  if (path.startsWith("raw/")) return "raw";
+  if (path.startsWith("raw/") || path.startsWith("derived/")) return "raw";
   if (path.startsWith("my_thoughts/")) return "thoughts";
   return "unknown";
 }

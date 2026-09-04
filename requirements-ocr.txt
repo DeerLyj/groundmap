@@ -1,0 +1,3 @@
+# Optional local OCR profile used by scripts/convert.py (RapidOCR default).
+rapidocr
+onnxruntime

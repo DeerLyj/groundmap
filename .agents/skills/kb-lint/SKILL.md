@@ -7,8 +7,8 @@ description: 知识库周度健康检查工作流——处理 #to-be-updated 积
 
 你现在是知识库的 **运维专家**。系统性地检查所有健康度问题，处理积压，把状态摆正。
 
-> **Workspace 前提（必读）**：数据层按主题隔离在 `workspaces/<name>/` 下。本文中所有 `wiki/`、`raw/`、`exports/`、`log.md` 路径均**相对于当前 workspace**，实际位于 `workspaces/<name>/`（如 `workspaces/smb-ecommerce/wiki/analyses/...`）。
-> - 默认 workspace 为 `smb-ecommerce`，不显式指定时即用它。
+> **Workspace 前提（必读）**：生产数据推荐通过 `KB_ROOT` 接入。`wiki/`、`raw/`、`derived/`、`exports/`、`log.md` 均相对于当前 workspace。
+> - 生产任务应显式指定 workspace；未指定时 CLI 自动选择。
 > - `k.py` 用 `--workspace <name>` 指定 workspace（参数紧跟脚本名，如 `python scripts/k.py --workspace smb-ecommerce health --json`）。
 > - `Read` / `Edit` / `Write` 与 `git add` 必须用**带 workspace 的全路径**（如 `Write workspaces/smb-ecommerce/wiki/analyses/周报-YYYY-WXX.md`）。
 > - 例外：`list-i18n-violations` 扫的是引擎根的 `web/` 目录（i18n 是引擎级通用代码，不属于任何 workspace 数据层），与 workspace 无关。
@@ -34,7 +34,7 @@ python scripts/k.py health --json
 - `#to-be-updated` 积压数（`to_update_count`）
 - 低 confidence 页面数（`low_confidence_count`）
 - Stale draft 数（`stale_drafts_count`，>30 天未改的 draft）
-- 失效引用数（`broken_refs_count`，`[[raw/...#^anchor]]` 命不中；`broken_refs_by_reason` 进一步拆 "raw 文件不存在" / "anchor 不存在" 两种治法）
+- 失效引用数（`broken_refs_count`，raw/derived 来源锚点命不中；按“文件不存在”与“anchor 不存在”分治）
 - 被引用但缺章节摘要（`unsummarized_sections_count`，被 wiki 章节引用但 outline.json 中 `agent_summary` 为 null 的章节）
 - 裸论断（`bare_claims_count`，含数字但无引用支撑的段落）
 - 索引 page_count drift（`index_count_mismatches_count`，type=index 页声明的 page_count 与 scope 实际匹配数不等）
@@ -99,10 +99,10 @@ python scripts/k.py list-conflicts --json
 python scripts/k.py list-bare-claims --json
 ```
 
-判别标准：含 `\d+%` / `\d+B 参数` / `2017 年` / `28.4 BLEU` 等具体数据，但段落里既没有 `[[raw/...]]` / `[[wiki/sources/...]]` 引用，也没有 `[需要来源]` 占位。
+判别标准：含具体数据，但段落里既没有 `[[derived/...#^anchor]]` / `[[wiki/sources/...]]` 引用，也没有 `[需要来源]` 占位。
 
 **对每条裸论断**：
-- 如果能立刻定位 raw 来源 → `Edit` 给段落补 `[[raw/<file>#^<anchor>]]`（可用 `python scripts/k.py find-anchor raw/<file>.md "<片段>"` 反查 anchor）
+- 如果能定位派生来源 → 给段落补 `[[derived/<file>#^<anchor>]]`（用 `find-anchor derived/<file>.md` 反查）
 - 如果暂时找不到来源 → `Edit` 段落末加 `[需要来源]` 占位（AGENTS.md 推荐的诚实标注）
 - 如果数字是上下文性提及（如"2017 年"指 Transformer 提出年）而非论断 → 也加 `[需要来源]` 让占位显式化
 
@@ -114,7 +114,7 @@ python scripts/k.py list-bare-claims --json
 
 1. `Read` 摘要页
 2. 找一条具体数据/论断（如"准确率 95.3%"）
-3. `Read` 它引用的 `[[raw/...#^anchor]]`
+3. `Read` 它引用的 `[[derived/...#^anchor]]`
 4. 验证引用对应的原文是否真的支持这个数字
 
 如果发现不一致：
@@ -229,9 +229,9 @@ python scripts/k.py list-source-issues --json
 
 **declared-but-uncited**（论断型页面声明了 sources 但正文无块级引用）：
 - 这是**语义层**缺陷：frontmatter 说"我有 N 个 source"但正文论断没真的 anchor 到它们
-- 修复：在论断段落补 `[[raw/<file>#^<anchor>]]` 或 `[[wiki/sources/<X>#^<anchor>]]` 引用
-  - 用 `python scripts/k.py find-anchor raw/<file>.md "<原文片段>"` 反查具体段的 anchor
-  - 优先用 `[[raw/...#^anchor]]`（一手出处）而非 `[[wiki/sources/X]]`（二手摘要）—— 前者引用粒度更强
+- 修复：在论断段落补 `[[derived/<file>#^<anchor>]]` 或 `[[wiki/sources/<X>#^<anchor>]]` 引用
+  - 用 `python scripts/k.py find-anchor derived/<file>.md "<原文片段>"` 反查具体段的 anchor
+  - frontmatter `sources` 保留 raw 原件；正文用 derived 锚点精确定位
 
 ## 第 6e 步：处理失效引用（broken refs）
 
@@ -239,12 +239,12 @@ python scripts/k.py list-source-issues --json
 python scripts/k.py list-broken-refs --json
 ```
 
-扫描 `wiki/` 中失效的 `[[raw/...#^anchor]]` 引用（对应 health 的 `broken_refs_count`；`broken_refs_by_reason` 拆两种原因）。**按原因分治**：
+扫描 `wiki/` 中失效的 raw/derived 锚点引用（对应 `broken_refs_count`）。**按原因分治**：
 
 | 原因 | 处理 |
 |---|---|
-| **raw 文件不存在**（`raw 文件不存在`） | 文件被重命名/移动：用 `git log -- <旧路径>` 找新位置，`Edit` 改对引用路径；确属未 ingest 占位：把引用改成 `[需要来源]` 并给该页加 `#to-be-updated` 等待 ingest |
-| **anchor 不存在**（`anchor 不存在`） | 通常是 raw 内容微调后 hash6 重算导致 anchor 漂移。用 `python scripts/k.py find-anchor raw/<file>.md "<原文片段>"` 反查当前 anchor，`Edit` 把引用更新为新 anchor |
+| **文件不存在** | 检查 Source Manifest 与迁移历史；确属未摄入则改为 `[需要来源]` 并标 `#to-be-updated` |
+| **anchor 不存在** | 重跑转换或用 `find-anchor derived/<file>.md` 反查当前 anchor，再更新引用 |
 
 > 失效引用会让"溯源链断裂"——论断声称有出处但点过去是空的，是知识库可信度的直接损伤，每周必清。
 
@@ -254,13 +254,13 @@ python scripts/k.py list-broken-refs --json
 python scripts/k.py list-unsummarized --json
 ```
 
-列出**被 wiki 章节引用、但 `.outline.json` 中 `agent_summary` 仍为 null** 的 raw 章节（对应 health 的 `unsummarized_sections_count`）。这些是 ingest 时漏回填精排摘要的章节——被引用却没有"这节讲了什么"的索引。
+列出被 wiki 引用、但 `derived/*.outline.json` 中 `agent_summary` 仍为 null 的章节。
 
 **对每条**：
-1. `Read` 或 `read-section` 该 raw 章节，理解其内容
+1. `Read` 或 `read-section` 该 derived 章节，理解其内容
 2. 调 `annotate-section` 回填精排摘要（这是受控写入派生层 `agent_summary` 字段，允许且必需）：
    ```bash
-   python scripts/k.py annotate-section raw/<file>.md <anchor> "本节论证..."
+   python scripts/k.py annotate-section derived/<file>.md <anchor> "本节论证..."
    ```
 
 > annotate-section 写 `agent_summary` 是 ingest 的必经步骤；本步是对历史遗漏的补课，**不是**手改 `.outline.json` 的其它内容（那仍被禁止）。
@@ -355,7 +355,7 @@ tags:
 ```
 
 ```bash
-# 路径用带 workspace 的全路径（默认 workspace 为 smb-ecommerce）
+# 路径用带 workspace 的全路径
 git add workspaces/<name>/wiki/analyses/周报-*.md workspaces/<name>/wiki/concepts/*.md \
         workspaces/<name>/wiki/indexes/*.md workspaces/<name>/log.md
 git commit -m "lint: 周度健康检查 WXX"

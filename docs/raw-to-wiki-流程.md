@@ -1,5 +1,7 @@
 # 从 `raw/` 到 `wiki/` ——一份原始资料的完整旅程
 
+> **v2 路径说明（2026-09-02）**：`raw/` 现在只保存不可变原件；`convert.py` 将 Markdown、OCR、outline 和 `*.source.json` 写到同一 workspace 的 `derived/`，并保持相对目录不变。例如 `raw/papers/a.pdf → derived/papers/a.md`。本文后续仍出现的 `raw/.../*.md` 命令属于旧 workspace 兼容示例；新摄入一律把这些读取、锚点和 `annotate-section` 路径替换为对应的 `derived/.../*.md`。frontmatter `sources` 仍指向 raw 原件。
+
 > 本文回答一个核心问题：**当我把一篇 PDF（或 docx / html / markdown）扔进 `raw/`，到它在 `wiki/` 里被引用、被检索、被分析，中间到底发生了什么？**
 >
 > 阅读对象：第一次接触本知识库的开发者 / agent。
@@ -81,6 +83,38 @@ python scripts/convert.py --dir workspaces/my-research/wiki/   # 显式指定目
 
 > `--dir` 给出时 `--workspace` 被忽略；目录按运行命令时所在位置解析（通常在仓库根运行，写 `workspaces/<name>/...` 这样的仓库相对路径），且必须在数据根内。
 
+### 图片 OCR 引擎选择
+
+图片转换默认调用本地 RapidOCR。首次使用先安装可选依赖：
+
+```powershell
+python -m pip install -r requirements-ocr.txt
+$env:KB_OCR_ENGINE = "rapidocr"
+python scripts/convert.py --workspace my-research --ext .jpg,.jpeg,.png --force
+```
+
+需要更强的中文复杂版面识别时，安装 PaddleOCR 及其推理引擎后切换：
+
+```powershell
+$env:KB_OCR_ENGINE = "paddleocr"
+python scripts/convert.py --workspace my-research --ext .jpg,.jpeg,.png --force
+```
+
+Tesseract 仅用于简单印刷体或安装验证：
+
+```powershell
+$env:KB_OCR_ENGINE = "tesseract"
+python scripts/convert.py --workspace my-research --ext .jpg,.jpeg,.png --force
+```
+
+也可以使用自定义命令覆盖内置引擎。命令必须包含 `{input}`，并把 OCR 文本写到标准输出：
+
+```powershell
+$env:KB_OCR_COMMAND = 'tesseract "{input}" stdout -l chi_sim+eng'
+```
+
+`KB_OCR_FALLBACK_COMMAND` 可配置第二个外部命令，在主 OCR 失败时对同一图片重试。该接口可以留给后续 DeepSeek Vision 复核适配器；它不会改变原始图片，也不会让 `convert.py` 直接调用 LLM。转换后的 Markdown 会保留原图引用，并记录 OCR 主引擎与复核状态。
+
 ### 单个文件做了什么（`convert.py` 的 `convert_file()`）
 
 ```
@@ -112,10 +146,14 @@ smith2024.md  +  smith2024.outline.json
 ### 幂等性
 
 `convert.py` 的 `should_convert()` 决定是否重新处理：
-- 派生 `.md` 或 `.outline.json` 不存在 → 处理
-- 非 `.md`：原文件 mtime > 派生 `.md` mtime → 重转
-- `.md`：检查文中是否已有 ≥3 处锚点尾巴（`postprocess.py` 的 `has_anchors()`）
-- 内容未变时输出与原文 byte-equal——不会污染 git 工作树
+- 派生 Markdown、outline、quality 或 Source Manifest 缺失 → 处理
+- 原文件大小 / mtime、转换管线版本或派生文件哈希变化 → 重转
+- 音频转写管线或 `wiki/source-reviews.json` 的人工复核记录变化 → 重转
+- 未变化的文件直接跳过；重转只原子覆盖 `derived/`，不修改 `raw/` 原件
+
+来源摘要应在 frontmatter 保存 `source_id`、`ingested_derived_sha256` 和对应管线版本。
+转换方法升级后运行 `python scripts/k.py list-stale-ingests`，只对报告为过期的来源摘要重新读取并更新；
+`--include-untracked` 可盘点尚未登记指纹的历史摘要。相同来源使用原有来源摘要，不新增重复页面。
 
 ### 同时生成的 `outline.json`
 
@@ -600,7 +638,8 @@ python scripts/k.py health
 
 | 现象 | 可能原因 | 处理 |
 |---|---|---|
-| `convert.py` 报"转换结果为空" | markitdown 不识别（如扫描版 PDF） | 手动转 OCR；或换 `pdfplumber` / `pymupdf` 预处理 |
+| `convert.py` 报 OCR 未安装 / 命令不存在 | 本地 OCR 后端未安装或配置错误 | 默认安装 `python -m pip install -r requirements-ocr.txt` 使用 RapidOCR；中文复杂版面可设置 `KB_OCR_ENGINE=paddleocr` 并按官方文档安装；也可用 `KB_OCR_COMMAND` 覆盖 |
+| `convert.py` 报"转换结果为空" | markitdown 不识别（如扫描版 PDF） | 先将 PDF 逐页转成图片再 OCR；图片转换默认使用 RapidOCR，复杂版面可切换 PaddleOCR |
 | outline.json 与 md 不同步 | 手改了 md 但没重跑 convert | `python scripts/convert.py --force`（整个 workspace 的 raw/）或 `--force --dir workspaces/my-research/raw/papers` 只重转一处 |
 | `k.py list-broken-refs` 报失效 | 原文内容微调导致 hash 变 | 手动改 wiki 引用为新 anchor，或在原文恢复变更 |
 | 摘要页里有 `[需要来源]` | 写时找不到精确出处 | lint 流程逐条补 anchor，或把论断降级为 `confidence: low` |

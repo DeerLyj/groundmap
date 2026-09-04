@@ -8,10 +8,10 @@
    web 端「编辑保存 / 冲突一键决议 / commit API」全链路 100% 失败。
    仿 test_i18n_sync.py：纯文本解析 TS 源，不执行。
 
-2. TestPreCommitHookGuard — scripts/hooks/pre-commit 的保护正则必须同时覆盖
+2. TestPreCommitHookGuard — scripts/hooks/pre-commit 的保护逻辑必须同时覆盖
    旧顶层 raw|my_thoughts/ 与现行 workspaces/<name>/raw|my_thoughts/ 布局。
    历史缺陷：正则只匹配旧顶层路径，对 workspaces 布局完全失效（死防线）。
-   做法：从 hook 源文件提取 grep -E 模式，用真实 grep 对样本路径断言。
+   做法：在临时 Git 仓库中执行真实 hook。
 
 3. TestSettingsDenyGuard — .claude/settings.json 的 deny 必须含 workspaces
    变体的 Write/Edit 拒绝模式（CLAUDE.md 核心原则 5 的 agent 层落地）。
@@ -57,51 +57,7 @@ class TestWebGitCwdGuard:
 
 
 class TestPreCommitHookGuard:
-    """从 hook 源提取 grep -E 模式，对样本路径跑真实 grep 断言行为。"""
-
-    BLOCKED = [
-        "raw/a.pdf",
-        "raw/a.md",  # 现行口径：raw 派生物也不入库（版权与隐私）
-        "my_thoughts/x.md",
-        "workspaces/smb-ecommerce/raw/x.pdf",
-        "workspaces/smb-ecommerce/raw/x.md",
-        "workspaces/any-name/my_thoughts/note.md",
-    ]
-    ALLOWED = [
-        "wiki/concepts/a.md",
-        "workspaces/smb-ecommerce/wiki/a.md",
-        "workspaces/smb-ecommerce/log.md",
-        "scripts/k.py",
-        "rawhide/readme.md",  # 前缀相似但不在保护区
-    ]
-
-    def _extract_pattern(self) -> str:
-        src = _read("scripts/hooks/pre-commit")
-        m = re.search(r"grep -E '([^']+)'", src)
-        assert m, "pre-commit hook 里找不到 grep -E '<pattern>' 保护正则"
-        return m.group(1)
-
-    def _grep(self, pattern: str, lines: list[str]) -> list[str]:
-        proc = subprocess.run(
-            ["grep", "-E", pattern],
-            input="\n".join(lines) + "\n",
-            capture_output=True,
-            text=True,
-        )
-        return [l for l in proc.stdout.splitlines() if l]
-
-    def test_blocks_both_layouts(self):
-        pattern = self._extract_pattern()
-        hits = self._grep(pattern, self.BLOCKED)
-        assert hits == self.BLOCKED, (
-            f"pre-commit 保护正则漏拦：{set(self.BLOCKED) - set(hits)}（必须同时覆盖"
-            "旧顶层与 workspaces/<name>/ 两种布局的 raw|my_thoughts）"
-        )
-
-    def test_passes_normal_paths(self):
-        pattern = self._extract_pattern()
-        hits = self._grep(pattern, self.ALLOWED)
-        assert hits == [], f"pre-commit 保护正则误伤正常路径：{hits}"
+    """在临时 Git 仓库中执行真实 hook，避免依赖系统 grep/bash。"""
 
     def test_installed_hook_in_sync(self):
         """已安装的 .git/hooks/pre-commit 必须与 scripts/hooks/ 源一致（防改了源忘了重装）。"""
@@ -135,7 +91,12 @@ class TestPreCommitHookGuard:
         hook_file.write_text(hook_src, encoding="utf-8")
         os.chmod(hook_file, 0o755)
         proc = subprocess.run(
-            ["git", "commit", "-q", "-m", "test"], cwd=repo, capture_output=True, text=True
+            ["git", "commit", "-q", "-m", "test"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return proc.returncode
 

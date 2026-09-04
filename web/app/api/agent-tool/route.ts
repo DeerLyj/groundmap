@@ -9,7 +9,7 @@
  *
  * 安全约束：
  *   - 工具名白名单（见 TOOL_HANDLERS）
- *   - 所有 path 参数走 isSafeRelPath 校验，限制在 wiki/ raw/ 下
+ *   - 所有 path 参数走 isSafeRelPath 校验，限制在 wiki/ raw/ derived/ 下
  *   - 透传 runKCli 现有的 30s 超时 + 10MB stdout 上限
  *   - 不内嵌 LLM SDK；本路由是纯 HTTP 桥接
  */
@@ -52,8 +52,8 @@ function requirePath(args: Record<string, unknown>): string | { error: string } 
   const p = getStr(args, "path");
   if (!p) return { error: "missing args.path" };
   if (!isSafeRelPath(p)) return { error: "invalid_path" };
-  if (!(p.startsWith("wiki/") || p.startsWith("raw/"))) {
-    return { error: "path must be under wiki/ or raw/" };
+  if (!(p.startsWith("wiki/") || p.startsWith("raw/") || p.startsWith("derived/"))) {
+    return { error: "path must be under wiki/, raw/, or derived/" };
   }
   return p;
 }
@@ -90,7 +90,8 @@ async function readWithSourcesFallback(
   if (!m) return primary;
   const basename = m[1];
 
-  // 候选 raw 路径：优先用摘要页 frontmatter 声明的 sources（精确），再退到 basename 猜测。
+  // 优先把 frontmatter 声明的 raw 原件映射到 derived Markdown；
+  // 同时保留旧 raw/*.md 布局作为兼容候选。
   const candidates: string[] = [];
   try {
     const page = await getPage(originalPath);
@@ -101,14 +102,26 @@ async function readWithSourcesFallback(
         const mm = s.match(/\[\[([^\]|#]+)/); // 取 [[ 后、到 | / # / ]] 前的路径
         if (!mm) continue;
         let p = mm[1].trim();
-        if (!p.endsWith(".md")) p += ".md";
-        if (p.startsWith("raw/") && isSafeRelPath(p)) candidates.push(p);
+        if (p.startsWith("derived/")) {
+          if (!p.endsWith(".md")) p += ".md";
+          if (isSafeRelPath(p)) candidates.push(p);
+        } else if (p.startsWith("raw/")) {
+          const rel = p.slice("raw/".length).replace(/\.[^/.]+$/, "");
+          const derived = `derived/${rel}.md`;
+          if (isSafeRelPath(derived)) candidates.push(derived);
+          if (p.endsWith(".md") && isSafeRelPath(p)) candidates.push(p);
+        }
       }
     }
   } catch {
     // getPage 失败（页面损坏等）→ 忽略，退到 basename 猜测
   }
-  candidates.push(`raw/articles/${basename}`, `raw/papers/${basename}`);
+  candidates.push(
+    `derived/articles/${basename}`,
+    `derived/papers/${basename}`,
+    `raw/articles/${basename}`,
+    `raw/papers/${basename}`,
+  );
 
   const seen = new Set<string>();
   for (const candidate of candidates) {
@@ -127,7 +140,7 @@ async function readWithSourcesFallback(
               _fallback: {
                 from: originalPath,
                 to: candidate,
-                reason: "anchor 未在 wiki/sources 找到，已回退到对应 raw 文件",
+                reason: "anchor 未在 wiki/sources 找到，已回退到对应来源视图",
               },
             }
           : retry.data;
@@ -255,6 +268,32 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
 
   async health() {
     return callKCli(["health"]);
+  },
+
+  async list_projects(args) {
+    const flags = ["project-list"];
+    const status = getStr(args, "status");
+    if (status) flags.push("--status", status);
+    return callKCli(flags);
+  },
+
+  async show_project(args) {
+    const projectId = getStr(args, "project_id");
+    if (!projectId || !/^[a-z0-9][a-z0-9_-]*$/.test(projectId)) {
+      return bad("invalid project_id");
+    }
+    return callKCli(["project-show", projectId]);
+  },
+
+  async context_pack(args) {
+    const projectId = getStr(args, "project_id");
+    if (!projectId || !/^[a-z0-9][a-z0-9_-]*$/.test(projectId)) {
+      return bad("invalid project_id");
+    }
+    let maxChars = getInt(args, "max_chars") ?? 30000;
+    if (maxChars < 1000) maxChars = 1000;
+    if (maxChars > 100000) maxChars = 100000;
+    return callKCli(["context-build", projectId, "--max-chars", String(maxChars), "--no-write"]);
   },
 
   async read_page(args) {

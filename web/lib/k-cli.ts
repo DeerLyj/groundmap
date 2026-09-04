@@ -4,7 +4,7 @@
  */
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { projectRoot, resolveWorkspace } from "./kb";
+import { engineRoot, projectRoot, resolveWorkspace } from "./kb";
 
 const PY = process.env.KB_PY || "python";
 
@@ -47,7 +47,8 @@ export async function runKCli<T = unknown>(
   const timeoutMs = options.timeoutMs ?? 30000;
   const parseStdoutOnNonZero = options.parseStdoutOnNonZero ?? false;
   const root = projectRoot();
-  const scriptPath = path.join(root, "scripts", "k.py");
+  // KB_ROOT 可指向独立数据仓库；scripts/k.py 始终属于引擎代码仓库。
+  const scriptPath = path.join(engineRoot(), "scripts", "k.py");
   // 与 web 显示层一致：cookie kb_workspace > KB_WORKSPACE env > 默认（resolveWorkspace 解析）
   const workspace = resolveWorkspace();
   const kpyArgs = ["--workspace", workspace, ...args, "--json"];

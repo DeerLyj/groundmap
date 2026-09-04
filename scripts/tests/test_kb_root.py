@@ -43,6 +43,8 @@ def _run(args, kb_root=None):
         [sys.executable, str(K_PY), *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env,
     )
 

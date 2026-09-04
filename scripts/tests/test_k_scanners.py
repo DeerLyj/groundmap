@@ -124,6 +124,76 @@ class TestListBareClaims:
         assert "175B" in items[0]["matched"][0]
 
 
+class TestListStaleIngests:
+    def test_reports_changed_derived_hash(self, fake_kb):
+        source = fake_kb / "raw" / "test" / "meeting.mp3"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"audio")
+        manifest = fake_kb / "derived" / "test" / "meeting.source.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            '{"source_id":"sha256:source","derived_sha256":"new",'
+            '"pipeline_version":3,"audio_pipeline_version":4}',
+            encoding="utf-8",
+        )
+        write_md(
+            fake_kb / "wiki" / "sources" / "meeting.md",
+            standard_fm(
+                type="source_summary",
+                source_count=1,
+                sources=["[[raw/test/meeting.mp3]]"],
+                source_id="sha256:source",
+                ingested_derived_sha256="old",
+                ingested_pipeline_version=3,
+                ingested_audio_pipeline_version=4,
+            ),
+            "# Meeting\n",
+        )
+
+        items = k.list_stale_ingests(k.load_all_wiki_pages())
+
+        assert len(items) == 1
+        assert items[0]["reasons"] == ["derived_changed"]
+
+    def test_matching_hash_is_current_and_untracked_is_optional(self, fake_kb):
+        source = fake_kb / "raw" / "test" / "meeting.mp3"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"audio")
+        manifest = fake_kb / "derived" / "test" / "meeting.source.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            '{"source_id":"sha256:source","derived_sha256":"same",'
+            '"pipeline_version":3,"audio_pipeline_version":4}',
+            encoding="utf-8",
+        )
+        write_md(
+            fake_kb / "wiki" / "sources" / "tracked.md",
+            standard_fm(
+                type="source_summary",
+                source_count=1,
+                sources=["[[raw/test/meeting.mp3]]"],
+                source_id="sha256:source",
+                ingested_derived_sha256="same",
+            ),
+            "# Tracked\n",
+        )
+        write_md(
+            fake_kb / "wiki" / "sources" / "legacy.md",
+            standard_fm(
+                type="source_summary",
+                source_count=1,
+                sources=["[[raw/test/meeting.mp3]]"],
+            ),
+            "# Legacy\n",
+        )
+
+        pages = k.load_all_wiki_pages()
+        assert k.list_stale_ingests(pages) == []
+        assert k.list_stale_ingests(pages, include_untracked=True)[0]["reasons"] == [
+            "tracking_missing"
+        ]
+
+
 # ============================================================
 # list_broken_refs
 # ============================================================
@@ -172,6 +242,33 @@ class TestListBrokenRefs:
         )
         items = k.list_broken_refs(k.load_all_wiki_pages())
         assert items == []
+
+    def test_derived_anchor_present(self, fake_kb):
+        derived = fake_kb / "derived" / "papers" / "foo.md"
+        derived.parent.mkdir(parents=True, exist_ok=True)
+        derived.write_text(
+            "# Title ^h-1-1-aaaaaa\n\nbody ^p-1-bbbbbb\n",
+            encoding="utf-8",
+        )
+        write_md(
+            fake_kb / "wiki" / "concepts" / "p.md",
+            standard_fm(),
+            "# X\n\nClaim [[derived/papers/foo#^p-1-bbbbbb]].\n",
+        )
+
+        assert k.list_broken_refs(k.load_all_wiki_pages()) == []
+
+    def test_derived_file_missing_is_labeled_derived(self, fake_kb):
+        write_md(
+            fake_kb / "wiki" / "concepts" / "p.md",
+            standard_fm(),
+            "# X\n\nClaim [[derived/papers/foo#^p-1-abc]].\n",
+        )
+
+        items = k.list_broken_refs(k.load_all_wiki_pages())
+
+        assert len(items) == 1
+        assert items[0]["reason"] == "derived 文件不存在"
 
     def test_wiki_internal_broken_ref_checked(self, fake_kb):
         # k-3：wiki -> wiki 的 ^anchor 失效现在也会被检出（目标文件不存在）

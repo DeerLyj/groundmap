@@ -1,7 +1,7 @@
 "use client";
 /**
  * 论文样式段落引用：把 markdown 里的 trailing anchor (`^h-/^p-/^t-/^c-/^f-`)
- * 与跨文档 raw wikilink (`[[raw/.../foo#^p-1-abc]]`) 按出现顺序统一编号，
+ * 与跨文档来源 wikilink (`[[raw/...]]` / `[[derived/...#^p-1-abc]]`) 按出现顺序统一编号，
  * 渲染时把它们变成 [n] 上标，文末渲染 References 区。
  *
  * 这是**显示层**抽象 —— 数据层 anchor / wikilink 完全不变，工具链照旧。
@@ -30,14 +30,14 @@ const LINE_ANCHOR_RE =
   /^(.*?)[ \t]+\^([hpcft]-\d+(?:-\d+)?-[a-z0-9]+(?:-\d+)?)[ \t]*$/gm;
 
 /**
- * Raw wikilink 引用扫描。匹配 `[[raw/...]]` / `[[raw/...#^anchor]]` / `[[raw/...|alias]]`。
- * 只扫 raw 引用 —— wiki 内部链接不纳入 References（语义上不是论文引用）。
+ * 来源 wikilink 引用扫描。raw 代表原件身份，derived 代表可定位文本视图。
+ * wiki 内部链接不纳入 References（语义上不是论文引用）。
  *
  * 与 markdown.ts 的 WIKILINK_RE 不同：这里只关心 raw 目标，且需要 anchor 的原始字符串
  * （保留 `^` 前缀方便规范化）。
  */
 const RAW_WIKILINK_RE =
-  /\[\[(raw\/[^\]|#]+?)(?:#(\^?[^\]|]+))?(?:\|[^\]]+)?\]\]/g;
+  /\[\[((?:raw|derived)\/[^\]|#]+?)(?:#(\^?[^\]|]+))?(?:\|[^\]]+)?\]\]/g;
 
 export type RefKind = "h" | "p" | "t" | "c" | "f" | "raw";
 

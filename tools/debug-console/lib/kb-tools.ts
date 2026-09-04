@@ -22,7 +22,7 @@ export interface KbTool {
 }
 
 const PATH_DESCRIPTION =
-  "知识库相对路径，必须落在 wiki/ 或 raw/ 下（如 wiki/concepts/transformer.md）";
+  "知识库相对路径，必须落在 wiki/、raw/ 或 derived/ 下（如 derived/papers/example.md）";
 
 export const KB_TOOLS: KbTool[] = [
   {
@@ -70,7 +70,7 @@ export const KB_TOOLS: KbTool[] = [
   {
     name: "read_section",
     description:
-      "按 anchor (如 'h-2-3-a3f2c1') 读取整个 H2/H3 段。常用于精确读 raw/papers 或 raw/articles 的某一节。",
+      "按 anchor (如 'h-2-3-a3f2c1') 读取整个 H2/H3 段。常用于精确读 derived/papers 或 derived/articles 的某一节。",
     input_schema: {
       type: "object",
       properties: {
@@ -150,11 +150,11 @@ export const KB_TOOLS: KbTool[] = [
   {
     name: "list_pages",
     description:
-      "按 frontmatter 过滤页面列表。可选过滤：type / status / confidence / tag / modified_by。无参数 = 列全部。",
+      "按 frontmatter 过滤 Wiki Markdown 页面列表。可选过滤：type / status / confidence / tag / modified_by。无参数 = 列全部；不能据此判断 raw/ 下是否存在未转换的原始文件。",
     input_schema: {
       type: "object",
       properties: {
-        type: { type: "string", description: "页面类型：entity / concept / source_summary / analysis / index" },
+        type: { type: "string", description: "页面类型：entity / concept / source_summary / analysis / comparison / index / memory" },
         status: { type: "string", description: "状态：draft / reviewed / deprecated" },
         confidence: { type: "string", description: "置信度：high / medium / low" },
         tag: { type: "string", description: "标签精确匹配（如 stub / to-be-updated）" },
@@ -179,7 +179,7 @@ export const KB_TOOLS: KbTool[] = [
   },
   {
     name: "list_broken_refs",
-    description: "扫描 wiki/ 中所有失效的 [[raw/...#^anchor]] 引用（指向不存在的 anchor）。",
+    description: "扫描 wiki/ 中所有失效的 raw/derived 块级引用。",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -192,6 +192,42 @@ export const KB_TOOLS: KbTool[] = [
     name: "health",
     description: "综合健康度报告：总页数、各类型计数、孤儿 / 冲突 / 失效引用统计。",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_projects",
+    description:
+      "列出当前知识库中的项目状态摘要。项目状态是工作上下文，不等于已确认的个人记忆。",
+    input_schema: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "可选：active / paused / blocked / completed / archived" },
+      },
+    },
+  },
+  {
+    name: "show_project",
+    description:
+      "读取一个项目的 State、Brief 和 Decision Record 摘要；未被 Human 确认的内容必须保留其未确认状态。",
+    input_schema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "项目 ID，如 china-bangladesh-ground-station" },
+      },
+      required: ["project_id"],
+    },
+  },
+  {
+    name: "context_pack",
+    description:
+      "生成并返回一个项目的最小 Context Pack，用于当前对话上下文；不会自动确认、写入或激活任何状态。",
+    input_schema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "项目 ID" },
+        max_chars: { type: "integer", description: "上下文长度上限，默认 30000", minimum: 1000, maximum: 100000 },
+      },
+      required: ["project_id"],
+    },
   },
 ];
 

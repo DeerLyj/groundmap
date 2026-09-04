@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 #
 # 知识库 Git pre-commit hook
 # ----------------------------
@@ -26,10 +26,17 @@ set -e
 # -c core.quotepath=false：默认 quotepath 会把非 ASCII 文件名转义成 "\345..." 带引号形式，
 # 行首引号使 ^ 锚定正则失配——中文知识库的常见文件名会直接穿透保护。
 forbidden=$(
-    git -c core.quotepath=false diff --cached --name-only \
-        | grep -E '^(raw|my_thoughts)/|^workspaces/[^/]+/(raw|my_thoughts)/' \
-        | grep -vE '(^|/)\.gitkeep$' \
-        || true
+    git -c core.quotepath=false diff --cached --name-only |
+    while IFS= read -r path; do
+        case "$path" in
+            raw/*|my_thoughts/*|workspaces/*/raw/*|workspaces/*/my_thoughts/*)
+                case "$path" in
+                    */.gitkeep) ;;
+                    *) printf '%s\n' "$path" ;;
+                esac
+                ;;
+        esac
+    done
 )
 
 if [ -z "$forbidden" ]; then
@@ -37,17 +44,15 @@ if [ -z "$forbidden" ]; then
 fi
 
 # 拦截
-echo ""
-echo "❌ 拒绝提交：以下文件位于只读区，不允许通过 agent commit："
-echo ""
-echo "$forbidden" | sed 's/^/   /'
-echo ""
-echo "原因：raw/ 是不可变的事实来源、默认不入库（版权与隐私，含 convert 派生物）；"
-echo "      my_thoughts/ 是人类专属区。两者均由 .gitignore 排除，本 hook 兜底 git add -f。"
-echo ""
-echo "如确需提交（仅限人类亲自操作）：用 --no-verify 显式跳过本 hook，"
-echo "并按惯例以 'human:' 开头写明缘由。"
-echo "  例：git commit --no-verify -m \"human: 手动修订核心原则页面\""
-echo ""
+printf '\n❌ 拒绝提交：以下文件位于只读区，不允许通过 agent commit：\n\n'
+while IFS= read -r path; do
+    printf '   %s\n' "$path"
+done <<EOF
+$forbidden
+EOF
+printf '\n原因：raw/ 是不可变的事实来源、默认不入库（版权与隐私，含 convert 派生物）；\n'
+printf '      my_thoughts/ 是人类专属区。两者均由 .gitignore 排除，本 hook 兜底 git add -f。\n\n'
+printf '如确需提交（仅限人类亲自操作）：用 --no-verify 显式跳过本 hook，\n'
+printf '并按惯例以 human: 开头写明缘由。\n\n'
 
 exit 1

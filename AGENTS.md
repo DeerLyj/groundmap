@@ -10,6 +10,8 @@
 
 **本项目准备在 GitHub 上开源，提供给所有人使用**。这意味着 agent 在执行任何操作（写代码、写文档、写 markdown、改 schema、加注释、命名变量等）时必须以"公开项目、面向全球开发者"为前提：
 
+GroundMap 是**通用引擎仓库**，不是任何个人或企业的知识仓库。生产数据应放在独立数据仓，通过 `KB_ROOT` 接入；本仓 `workspaces/` 只保留可公开示例与测试数据。未设置 `KB_ROOT` 的同仓模式仅用于演示、测试和向后兼容。
+
 - 代码、注释、commit message、文档**不得包含**任何个人隐私信息（真实姓名、邮箱、私钥、token、API key、内网地址、私人路径硬编码等）
 - 不得包含仅作者本人能理解的语境（"我昨天和老王说的那个" / "公司内部那套" / 具体客户名）
 - 设计与文档应假设**陌生贡献者也能读懂并复现**——路径用相对路径或环境变量，依赖与运行步骤显式声明，避免"只在我机器上能跑"的假设
@@ -20,14 +22,14 @@
 
 ## 核心设计原则（不可违反）
 
-1. **知识库不调用 LLM**。所有 LLM 推理由外部 agent 完成；知识库本身只暴露 MCP 工具与 REST API，不内嵌任何 agent runtime、LLM SDK 或对话能力。
+1. **知识库核心不调用 LLM，也不搜索 Web**。所有推理、联网和来源融合由外部 agent/client 完成；核心只提供 CLI、REST 与本地证据，不内嵌 agent runtime、LLM SDK 或搜索服务。
    - **本条原则的范围**：`scripts/`、`web/`（KB 核心）严禁内嵌 LLM SDK。
    - **例外**：`tools/debug-console/` 是独立子项目，**作为 KB 的外部客户端存在**，可以引入 LLM SDK。它只通过 HTTP 调主 `web/` 的 REST API（`/api/agent-tool` 等），不直接读 markdown / `.cache/`。删掉 `tools/` 整个目录不影响 KB 任何功能。
-2. **markdown + Git 是唯一真相源**。SQLite 索引（`.cache/index.db`）是派生层，可随时从 markdown 全量重建。删 `.cache/` 系统仍能跑。
+2. **原始文件 + markdown + Git 是长期真相源**。`raw/` 保存不可变原件，`wiki/` 保存可审阅知识；`derived/` 与 `.cache/` 都可由真相源重建，删除后不丢事实。
 3. **完整页面优先**。所有读取工具返回**完整页面或完整 H2/H3 段**，绝不返回 chunk。
-4. **严禁 embedding 召回**。embedding 模型 / 向量存储 / 文档切片不出现在系统的任何"找相关内容"逻辑中。检索靠 BM25 全文 + 元数据过滤 + agent 阅读完整页面。
+4. **默认检索不依赖 embedding**。当前检索使用全文、元数据、链接关系与完整页面阅读。只有真实评测证明必要时，embedding 才可作为显式启用、可删除重建的辅助派生层；不得取代原文、稳定引用或默认检索。
 5. **写权限硬约束**：写 `raw/**`、`my_thoughts/**`、含 `#human-only` 标签或 `locked: true` frontmatter 的文件 → 工具直接拒绝（PermissionError），不是 ask、不是 warn、是 deny。
-6. **删除即标记**：所有"删除"操作只能改 `status: deprecated`，绝不真删文件；历史信息有内在价值。
+6. **知识记录逻辑删除，派生物允许物理删除**：有历史价值的 `wiki/**` 页面改 `status: deprecated`；`.next/`、`.pytest_cache/`、`.cache/`、临时渲染、空误生成文件及已校验重复副本可物理删除。
 
 ---
 
@@ -57,10 +59,11 @@ groundmap/                   # 引擎根（通用代码 + 规范）
 ├── scripts/                 # 自动化脚本（k.py、convert.py）——通用
 ├── web/                     # Web 管理台（Next.js）——通用
 ├── .claude/skills/          # Claude Code 技能定义——通用
-├── workspaces/              # 多主题工作区（可切换）；本仓自带 3 个示例库
+├── workspaces/              # 仅公开示例与测试数据；生产数据通过 KB_ROOT 接入
 │   ├── smb-ecommerce/       # ← 示例：跨境电商
 │   │   ├── wiki/            # agent 维护的 Wiki（可读写，随仓分发）
 │   │   ├── raw/             # 原始资料（agent 不可改；版权原因不随仓分发，仅留 .gitkeep）
+│   │   ├── derived/         # 转换、OCR、结构化抽取（可重建）
 │   │   ├── exports/         # 输出物归档
 │   │   ├── my_thoughts/     # 人类专属区（agent 只读；不随仓分发，仅留 .gitkeep）
 │   │   ├── .cache/          # SQLite 索引（gitignored，可重建）
@@ -77,41 +80,16 @@ groundmap/                   # 引擎根（通用代码 + 规范）
 
 ---
 
-## 双仓库同步约定（dev ↔ release）
+## 引擎内镜像约定
 
-本仓库（`AI知识库/`）与 `groundmap-release/` 是**两个独立 Git 仓库**承担不同角色：
+以下镜像和不变量属于当前仓库，必须由测试守护；不再假设存在另一个 dev/release 仓库：
 
-| 仓库 | 角色 | 数据 | 分支 |
-|---|---|---|---|
-| `AI知识库/`（本仓） | **开发版** | 含实际 wiki / raw / exports 数据 | `rag-evolution-ip-standard` 等 |
-| `groundmap-release/` | **发布版** | 引擎 + 3 个精选示例 demo 库（仅 `wiki/` 随仓；`raw/`、`my_thoughts/` 不分发）+ 已审的发布准备改动 | `main` |
-
-**哪些修改必须双仓同步**（任一改完都需在另一仓做对应改动，否则下次 sync 漂移）：
-
-1. **`scripts/k.py`、`scripts/convert.py`、`scripts/section_parser.py`、其他通用引擎代码**：
-   同步整个文件；release 的 workspace fallback 逻辑（k.py 第 2644-2671 行）保留不动。
-2. **`scripts/tests/`**（含 `TestMirrorSync` 守护）：**完全镜像**——dev 改了测试，release 必须改相同处。
-3. **`.claude/skills/kb-*/SKILL.md` 与 `.agents/skills/kb-*/SKILL.md`**：SKILL.md 内容**逐字相同**（`.claude ↔ .agents` 由 `TestMirrorSync.test_skills_mirror` 守），dev 与 release 之间靠人肉 / rsync 同步。
-4. **`web/`（Next.js 管理台）**：dev 与 release 同步主要 UI 改动；release 可能含更多发布准备（i18n key 整理、未发布特性等），合并时以 release 为基线。
-5. **`docs/`**（用户文档）：dev 写新内容 → 同步到 release；release 的发布准备改动（demo 视频、新手教程）一般不回 dev。
-
-**哪些修改不要镜像到 release**：
-
-- dev 里**实际在用的**工作数据（`workspaces/<name>/raw/**`、私人 `my_thoughts/**`、`exports/**`）——不镜像到 release。release 自带的是另一套**精选 demo 库**：仅 `wiki/` 随仓分发，`raw/`、`my_thoughts/` 不分发。
-- dev 专属的实验性 lint / 临时脚本。
-
-**不变量清单**（任一变动都视作"破坏不变量"、必须同时同步）：
-
-- `RELATION_TYPES` 白名单 7 类（k.py ↔ web/lib/markdown.ts）
-- `WIKILINK_RE` 正则（k.py ↔ web/lib/markdown.ts）
-- `TestMirrorSync` 的归一化规则（CLAUDE.md ↔ AGENTS.md ↔ `.claude/skills ↔ .agents/skills`）
-- 默认 workspace 解析（dev 默认 `smb-ecommerce`；release 不设固定默认——未指定时 CLI 自动选用存在的第一个 workspace，**故意不同**，反映发布清理意图）
-
-**`TestMirrorSync` 守护的镜像范围**（仅在单仓内）：
-
-- `CLAUDE.md` ↔ `AGENTS.md`（按归一化：Claude Code/Codex、CLAUDE.md/AGENTS.md、`.claude/skills/.agents/skills` 三组替换后必须一致）
-- `.claude/skills/*/SKILL.md` ↔ `.agents/skills/*/SKILL.md`（同归一化）
-- **dev 与 release 之间没有跨仓镜像测试**——必须靠"修改后手动 sync + 跑两侧 `pytest scripts/tests/`"保证
+- `RELATION_TYPES` 白名单 7 类（`scripts/k.py` ↔ `web/lib/markdown.ts`）。
+- `WIKILINK_RE` 正则（`scripts/k.py` ↔ `web/lib/markdown.ts`）。
+- `CLAUDE.md` ↔ `AGENTS.md` 按 agent 专属命名归一化后必须一致。
+- `.claude/skills/*/SKILL.md` ↔ `.agents/skills/*/SKILL.md` 按相同规则保持镜像。
+- 默认 workspace 解析：未指定时自动选用当前数据根中存在的第一个 workspace。
+- 私人数据仓的 `AGENTS.md` / `PROJECT.md` 不镜像进本仓；它们负责私人目标与数据边界。
 
 ---
 
@@ -120,7 +98,8 @@ groundmap/                   # 引擎根（通用代码 + 规范）
 | 路径 / 标记 | 权限 |
 |---|---|
 | `raw/**` 下原始文件（pdf/docx/html/...） | **绝对只读** — 写操作工具直接拒绝 |
-| `raw/**/*.md` 与 `raw/**/*.outline.json` | agent **不得手改**；由 `scripts/convert.py` 写入和重生成（派生层）。**例外**：`*.outline.json` 的 `agent_summary` 字段可经 `python scripts/k.py annotate-section` 回填（②③ 档 ingest 流程的必经步骤），不得手动编辑该文件 |
+| `derived/**` | 转换、OCR 与结构化抽取流程可写、可重建；不得冒充已审核知识 |
+| `derived/**/*.outline.json` | 由工具生成；仅 `annotate-section` 可回填 `agent_summary`，不得手改其它字段 |
 | `my_thoughts/**` | **只读** — 写操作工具直接拒绝 |
 | 含 `#human-only` 标签的文件 | **只读** |
 | 含 `locked: true` frontmatter 的文件 | **只读** |
@@ -131,7 +110,7 @@ groundmap/                   # 引擎根（通用代码 + 规范）
 
 ## Workspace 切换
 
-引擎代码（scripts/、web/）一套通用，数据层按主题隔离在 `workspaces/<name>/` 下。
+引擎代码（scripts/、web/）一套通用。推荐用 `KB_ROOT` 指向独立数据仓；本仓 `workspaces/<name>/` 仅用于公开示例、测试和兼容。
 
 ### k.py CLI
 
@@ -159,14 +138,14 @@ cd web && KB_WORKSPACE=ai-ml-demo npm run dev
 
 ### 设计原则
 
-- 所有 workspace 共享同一个 Git repo（引擎代码 + 数据一起版本控制）
+- 同一数据根下的 workspace 共享该数据仓的 Git 历史；不要求与引擎同仓
 - 不指定 workspace 时 CLI 自动选用存在的第一个 workspace（库多时打印提示）
-- 每个 workspace 内部结构相同（wiki/、raw/、exports/、my_thoughts/、.cache/、log.md）
+- 每个 workspace 内部结构相同（wiki/、raw/、derived/、exports/、my_thoughts/、.cache/、log.md）
 - `wiki/_templates/` 保留在引擎根，所有 workspace 共用
 
-### 跨独立项目复用引擎（`KB_ROOT`）
+### 推荐部署：独立数据仓（`KB_ROOT`）
 
-上面的 `workspaces/<name>/` 适合"同一仓库里的多主题"。若要**一份引擎服务多个独立项目**（各项目有自己的 repo / 数据），用环境变量 `KB_ROOT` 把引擎指向项目的数据根（含 `workspaces/` 的目录）：
+生产和私人使用应把引擎与数据分离：用环境变量 `KB_ROOT` 指向包含 `workspaces/` 的独立数据仓。一份引擎可以服务多个项目数据仓。
 
 ```bash
 # 引擎装一份，数据在各项目自己的目录里
@@ -175,7 +154,7 @@ KB_ROOT=/path/项目A/kb-data python scripts/convert.py --workspace main
 cd web && KB_ROOT=/path/项目A/kb-data KB_WORKSPACE=main npm run dev
 ```
 
-- `KB_ROOT` 未设时默认 = 引擎根（数据与代码同库，向后兼容）。
+- `KB_ROOT` 未设时默认 = 引擎根，仅用于示例、测试和向后兼容；不推荐承载生产或私人资料。
 - `k.py` / `convert.py` / `web`（`lib/kb.ts`）三处对 `KB_ROOT` 语义一致：数据根下须有 `workspaces/<name>/`。
 - 这样优化引擎只改引擎一份、所有项目共享；各项目按需 pin 引擎版本，仅当遇到契约类升级（见「演进与兼容性」节）才需对各自数据走迁移四步。
 - **两级定位**：`KB_ROOT` 选「哪个项目」（含 `workspaces/` 的数据根），`--workspace` / `KB_WORKSPACE` 选「该项目内的哪个库」。单库项目用 `--workspace main` 即可。
@@ -191,7 +170,7 @@ cd web && KB_ROOT=/path/项目A/kb-data KB_WORKSPACE=main npm run dev
 ```yaml
 ---
 title: ""
-type: entity | concept | source_summary | analysis | comparison | index
+type: entity | concept | source_summary | analysis | comparison | index | memory
 created_date: YYYY-MM-DD
 last_modified: YYYY-MM-DD
 last_modified_by: LLM | Human
@@ -233,6 +212,7 @@ tags: []
 | `concept` / `entity` | **> 0**（占位 stub 除外） | 概念 / 实体的数据 / 描述需要溯源 |
 | `analysis` / `comparison` | **≥ 2** | 跨文档综合的本质就是综合多个来源 |
 | `index`（MOC）| **= 0** | MOC 只做导航不做论断 |
+| `memory` | **≥ 0** | 个人偏好 / 目标 / 约束 / 决策等操作记忆，可来自已确认的对话，不强制绑定 raw 来源 |
 
 **stub 例外**：尚未 ingest 完整来源的 `concept` / `entity` 页允许 `source_count: 0`，但**必须在 `tags:` 里加 `to-be-updated` 或 `stub`**——这是显式的"我知道还不完整"标记。
 
@@ -339,6 +319,18 @@ tags: []
 
 人类在 Web 管理台的"冲突工作台"中决议后，由 `resolve_conflict` 工具改写。可选解决方式：`keep_old` / `adopt_new` / `merge` / `keep_watching`。
 
+## 个人记忆层规范（可选）
+
+个人 workspace 可在 `wiki/memory/` 下维护与外部知识分开的 Agent 操作记忆：个人偏好、输出要求、目标、约束和已确认决策。
+
+- `status: draft` + `tags: [memory-candidate]`：LLM 提出的候选记忆，不能作为稳定偏好自动使用。
+- `status: reviewed` + `last_modified_by: Human` + `tags: [memory-confirmed]`：人类确认后的长期记忆，允许 Agent 在任务开始时读取。
+- Agent 可以在对话中自动提出候选记忆，但必须明确标注“候选 / 待确认”；将候选持久化到 `wiki/memory/candidates/` 仍需用户明确触发或产品确认动作。
+- 新 workspace 默认生成 `wiki/memory/confirmed.md` 草稿；人类确认后再把它改为 `reviewed` 并加上 `memory-confirmed` 标签。
+- Agent 不得自行把候选记忆升级为 `reviewed`，也不得把临时会话当作长期偏好。
+- 记忆页不强制绑定 raw 来源，但必须保留创建时间、确认时间、适用范围和置信度等元数据。
+- 隐私 / 家庭内容默认不进入该目录；需要排除的内容应在任务开始前明确标记。
+
 ---
 
 ## 四大操作流程
@@ -350,8 +342,8 @@ tags: []
 > **核心原则**：全流程 agent 自决，**不询问用户**。所有 AI 判断落到 source_summary / MOC 的具体节，可在 web 端审计与覆盖；mis-classification 由 lint 流程检测后人工纠正。详细流程见 `.claude/skills/kb-ingest/SKILL.md`。
 
 1. 用户将原始文件放入 `raw/` 对应子目录（agent 不得修改原始文件）
-2. agent 调 `python scripts/convert.py`：把原始格式转为 markdown，自动加锚点（`^h-`/`^p-`/`^t-`/`^c-`/`^f-`），并生成 `.outline.json`
-3. agent 调 `python scripts/k.py outline <raw_path>` 看大纲，**按字符数三档自决阅读策略**：
+2. agent 调 `python scripts/convert.py`：只读 raw 原件，在 `derived/` 生成统一 Markdown、稳定锚点、`.outline.json` 与 `.source.json` Source Manifest
+3. agent 调 `python scripts/k.py outline <derived_path>` 看大纲，**按字符数三档自决阅读策略**：
    - **① 短文** `< 30000`（约 3 万中文字）：`Read` 全文
    - **② 中长文** `30000 – 150000`（论文 / 报告级）：按 H1 切块、每块 ≤ 3 万分段 `read-section`
    - **③ 整本书规模** `> 150000`：TOC 扫全 + AI 自决深读章节，**全部章节登记**到 source_summary 的「## 章节深度登记」表（含状态：✓ 深读 / ⊙ 扫读 / × 跳过）。⊙ 扫读章节保留 partial re-ingest 升级路径
@@ -365,13 +357,15 @@ tags: []
 10. agent **自动决定 MOC 归属**：用 source_summary 的 tags 反查现有 MOC，命中则在「近期更新」节追加；无命中则用 `_templates/index_template.md` 自动新建 MOC + 在 root_index 加入口
 11. agent **图谱接入与校验**：写互链时凡关系属标准类型（支持/反驳/延伸/属于/组成/替代/引用）即用 `[[目标|SUPPORTS]]` 等标准关系类型（白名单见「关系类型语法（v0.4b 图谱）」节）让图谱可按边染色；收尾跑 `python scripts/k.py list-relation-issues`（须为空）与 `python scripts/k.py graph`（确认本次新页面已作为节点接入、边正常、无意外孤立节点——孤立即回第 8 步补 `[[...]]` 互链）。图谱是**派生层**（从 wiki 双链实时计算、无持久文件，对齐「markdown 是唯一真相源」），本步只校验、不产出需提交的文件
 12. agent 追加 log.md 条目
-13. **提交前质量闸门**（须全过，不过则补齐再提交）：`python scripts/k.py list-bare-claims` / `list-coarse-citations` / `list-source-issues` / `list-broken-refs` / `list-relation-issues` 须全空——裸论断补块级引用、整页引用升块级、缺 source 补全、失效引用修掉、非法关系词改正。通过后 agent `git commit -m "ingest: <来源标题>"` 原子提交（只含 `wiki/**` 改动 + `log.md`；`raw/` 及其派生 .md / .outline.json 默认被 `.gitignore` 排除、留在本地，不入库——版权与隐私原因）
+13. **提交前质量闸门**（须全过，不过则补齐再提交）：`python scripts/k.py list-bare-claims` / `list-coarse-citations` / `list-source-issues` / `list-broken-refs` / `list-relation-issues` 须全空。frontmatter `sources` 指向 raw 原件，正文论断用 `derived/...#^anchor` 精确定位。提交仅含 `wiki/**` 与 `log.md`；raw/derived 默认留在数据仓本地。
 
 > **partial re-ingest（增量深化）**：第 ③ 档扫读 / 跳过的章节保留升级路径，由 kb-query / kb-lint / 用户 web 端三种方式触发深化。AI 自动重读该章节 → 更新现有 source_summary（不新建）→ 章节登记表 ⊙ → ✓ → log.md 记 `partial-ingest` 类型 → git commit。
 
 ### Query 操作流程
 
 **核心步骤**（kb-query skill 完整规范见 `.claude/skills/kb-query/SKILL.md`）：
+
+证据范围由外部 agent/client 显式控制：`local` 只用本地库；`hybrid` 先查本地再查 Web，并分开标识两类来源。GroundMap 核心始终不联网，外部结果未经摄入审核不得自动成为长期知识。
 
 1. agent 调 `read_index("wiki/root_index.md")` → 定位子索引
 2. agent 调 `read_index` 钻取到具体子索引
@@ -408,7 +402,7 @@ skill 设计了 4 个深度模式，但**Claude Code 中默认且唯一行为是
 1. agent 调 `list_to_update` → 逐个处理 `#to-be-updated` 积压
 2. agent 调 `list_orphans` → 处理孤儿页面（无入链）
 3. agent 调 `list_conflicts` → 复核所有冲突标注
-4. agent 抽查 wiki 论断与 raw 来源的一致性（fact-check）
+4. agent 抽查 wiki 论断与 derived 锚点、raw 原件身份的一致性（fact-check）
 5. agent 检查缺少独立页面的重要概念
 6. agent 调 `archive_analysis` 生成 `wiki/analyses/周报-YYYY-WXX.md`
 7. agent 调 `append_log`
@@ -509,12 +503,12 @@ export function MyButton() {
 ## 禁止事项
 
 - ❌ 在知识库代码中内嵌任何 LLM 调用 / Agent runtime（违反原则 1）
-- ❌ 引入 embedding 模型 / 向量存储 / 文档切片（违反原则 4）
-- ❌ 修改 `raw/` 目录中的原始文件（pdf/docx/...）；`raw/**/*.md` 与 `*.outline.json` 是 `convert.py` 派生产物，agent 也不要手改（下次 convert 会被覆盖）
+- ❌ 把 embedding / 向量存储设为默认检索，或让它取代稳定引用与完整页面阅读
+- ❌ 修改 `raw/` 中的任何原始文件；转换、OCR 和结构化抽取只能写入 `derived/`
 - ❌ 修改 `my_thoughts/` 或 `#human-only` / `locked: true` 文件
 - ❌ 写入无来源引用的实质性论断
 - ❌ 直接覆盖冲突内容（必须使用冲突标注格式）
-- ❌ 真删除文件（改为 `status: deprecated`）
+- ❌ 物理删除有历史价值的知识页面（应改为 `status: deprecated`）；可重建缓存、临时文件、空误生成文件和已校验重复副本不受此限
 - ❌ 在未完成操作时提交 commit（保持原子性）
 - ❌ 在 Web 组件里写硬编码的中文/英文 UI 字符串（必须用 `t()` / `useT()`，详见"Web 管理台国际化方案"）
 - ❌ 尝试调用 `mcp__kb__*` 或任何 MCP tool（项目无 MCP server，详见"实际操作入口（无 MCP）"）
@@ -529,8 +523,8 @@ export function MyButton() {
 
 | 层 | 内容 | 改它时 |
 |---|---|---|
-| **真相源** | `wiki/**.md`（agent 维护的知识）、`raw/` 原始文件 | 纯 markdown，不依赖任何代码即可读懂 / diff；删光代码内容仍在 |
-| **派生层** | `.cache/index.db`、`raw/**.outline.json` | 可随时从真相源**全量重建**，删了不丢信息 |
+| **真相源** | `wiki/**.md`（可审阅知识）、`raw/` 原始文件 | 不依赖索引或模型即可读取与迁移 |
+| **派生层** | `derived/**`、`.cache/index.db` | 可随时从真相源**全量重建**，删了不丢信息 |
 | **代码层** | `scripts/`、`web/` | 改它**不改数据**——除非它正是负责生成"数据契约"的那部分（见 B） |
 
 核心保障：内容是人可读的 markdown，不像向量 RAG 那样把知识锁进"换模型就得全量重算"的黑盒。
@@ -548,7 +542,7 @@ export function MyButton() {
 
 只有改到这几样**格式约定**才会影响旧内容：
 
-1. **锚点生成算法**（`scripts/postprocess.py` 的 hash / seq / 锚点格式）——改了它，重新 convert 会产出不同 anchor，wiki 里 `[[raw/...#^旧anchor]]` 引用会集体失效。
+1. **锚点生成算法**（`scripts/postprocess.py` 的 hash / seq / 锚点格式）——改了它，重新 convert 会产出不同 anchor，wiki 里指向 `raw/` 或 `derived/` 的旧引用可能集体失效。
 2. **frontmatter schema**（必填字段增 / 删 / 改）——旧页缺字段（`validate-frontmatter` 会报，但内容仍可读）。
 3. **`[[wikilink]]` / `^anchor` 语法**——旧引用解析失配。
 4. **标准关系类型白名单**（删 / 改已有项；**新增**是向后兼容的）。
@@ -556,7 +550,7 @@ export function MyButton() {
 ### C. 契约类改动的迁移四步法
 
 1. **改代码** + 加**回归测试** pin 住新行为（如锚点稳定性测试、drift-sync 测试）。
-2. **迁移数据**：写确定性脚本把旧格式映射到新格式（如锚点按稳定前缀做 old→new 重写所有引用），只动 `wiki/**`，不手改 `raw/**` 派生物。
+2. **迁移数据**：写确定性脚本把旧格式映射到新格式（如锚点按稳定前缀做 old→new 重写所有引用），不改 raw 原件，也不手改 derived 生成物。
 3. **验证**：跑 `python scripts/k.py --workspace <w> list-broken-refs`，要求失效引用数**不增加**（理想归零）；并跑 `validate-frontmatter` / `health`。
 4. **原子提交**：代码 + 迁移 + 测试一并 commit，信息注明契约变更；出问题可 `git revert`。
 

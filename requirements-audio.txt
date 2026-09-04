@@ -1,0 +1,3 @@
+# Optional local audio transcription profile used by scripts/convert.py.
+faster-whisper>=1.2,<2
+opencc>=1.4,<2

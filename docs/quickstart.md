@@ -68,9 +68,9 @@ Open [http://localhost:3006](http://localhost:3006).
 
 ## Workspaces
 
-Engine code (`scripts/`, `web/`) is shared across topics; data lives under `workspaces/<name>/` with the same internal layout (`wiki/`, `raw/`, `exports/`, `my_thoughts/`, `.cache/`, `log.md`). When no workspace is specified, the CLI auto-selects one (and prints a hint when several exist); pass `--workspace <name>` (CLI) or `KB_WORKSPACE=<name>` (Web) to choose.
+Engine code (`scripts/`, `web/`) is shared across topics; data lives under `workspaces/<name>/` with the same internal layout (`raw/`, `derived/`, `wiki/`, `exports/`, `my_thoughts/`, `.cache/`, `log.md`). Production data should live in a separate repository connected through `KB_ROOT`.
 
-This repository ships **three example workspaces** — `smb-ecommerce`, `rag-evolution`, and `ai-ml-demo` — whose `wiki/` pages are fully browsable on a fresh clone. Only each workspace's `raw/` sources (copyright) and `my_thoughts/` (private notes) are excluded by `.gitignore`. To start your **own** knowledge base, create a new workspace (optional — not a prerequisite for exploring the examples):
+This repository ships example workspaces whose `wiki/` pages are browsable on a fresh clone. Their `raw/` originals, `derived/` artifacts, and `my_thoughts/` notes are excluded by `.gitignore`.
 
 ```bash
 python scripts/k.py new-workspace my-research
@@ -166,10 +166,10 @@ cp /path/to/my_article.html workspaces/my-research/raw/articles/
 python scripts/convert.py --dir workspaces/my-research/raw/articles --ext .html
 
 # k.py path arguments are workspace-relative (resolved under the active workspace)
-python scripts/k.py outline raw/articles/my_article.md
+python scripts/k.py outline derived/articles/my_article.md
 ```
 
-Converted markdown and `.outline.json` files are derived artifacts. Do not hand-edit them; regenerate from the original source file.
+Converted Markdown, `.outline.json`, and `.source.json` files live under `derived/`. Do not hand-edit them; regenerate from the original file under `raw/`.
 
 ## Work With an External Agent
 

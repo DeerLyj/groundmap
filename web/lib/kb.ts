@@ -26,6 +26,11 @@ export function projectRoot(): string {
   return path.resolve(process.cwd(), "..");
 }
 
+/** 引擎代码根目录；KB_ROOT 只指向数据根，不能用于定位 scripts/。 */
+export function engineRoot(): string {
+  return path.resolve(process.cwd(), "..");
+}
+
 export const WORKSPACE_COOKIE = "kb_workspace";
 const DEFAULT_WORKSPACE = "smb-ecommerce";
 // workspace 名只允许字母/数字/下划线/连字符——同时挡住 cookie/env 里的 ../ 路径穿越
@@ -119,11 +124,11 @@ export function isSafeRelPath(relPath: string): boolean {
   }
 }
 
-/** 读侧目录白名单：只有 wiki/ 与 raw/ 是 agent / web 可读区。 */
-const READABLE_DIR_PREFIXES = ["wiki/", "raw/"] as const;
+/** 读侧目录白名单：wiki、raw 原件与 derived 派生物。 */
+const READABLE_DIR_PREFIXES = ["wiki/", "raw/", "derived/"] as const;
 
 /**
- * 校验一个相对路径是否落在**可读区**（wiki/ 或 raw/）。
+ * 校验一个相对路径是否落在**可读区**（wiki/、raw/ 或 derived/）。
  *
  * `isSafeRelPath` 只防路径穿越（不出 PROJECT_ROOT），但 `my_thoughts/`、`exports/`、
  * `log.md` 等仍在工作区内、`isSafeRelPath` 会放行。读侧（GET /api/pages、/outline、

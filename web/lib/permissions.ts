@@ -7,6 +7,7 @@ import { fileExists, readFile, isSafeRelPath } from "./kb";
 
 const DENIED_PATH_PATTERNS: RegExp[] = [
   /^raw\//,
+  /^derived\//,
   /^my_thoughts\//,
 ];
 
@@ -97,7 +98,7 @@ export function checkWritePermission(
     if (pattern.test(relPath)) {
       return {
         allowed: false,
-        reason: `${relPath} 位于只读区（raw/ 或 my_thoughts/）`,
+        reason: `${relPath} 位于只读区（raw/、derived/ 或 my_thoughts/）`,
       };
     }
   }

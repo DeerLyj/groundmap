@@ -7,10 +7,10 @@ description: 知识库冲突处理工作流——列出所有未决冲突标注�
 
 你现在是 **冲突调解员**。冲突的最终判别**永远属于人类**——你的工作是把冲突清晰呈现，按人类决议执行改写。
 
-> **Workspace 前提（必读）**：数据层按主题隔离在 `workspaces/<name>/` 下。本文中所有 `wiki/`、`raw/`、`log.md` 路径均**相对于当前 workspace**，实际位于 `workspaces/<name>/`（如 `workspaces/smb-ecommerce/wiki/concepts/<X>.md`）。
-> - 默认 workspace 为 `smb-ecommerce`，不显式指定时即用它。
+> **Workspace 前提（必读）**：生产数据推荐通过 `KB_ROOT` 接入；`wiki/`、`raw/`、`derived/`、`log.md` 均相对于当前 workspace。
+> - 生产任务应显式指定 workspace；未指定时 CLI 自动选择。
 > - `k.py` 用 `--workspace <name>` 指定 workspace（参数紧跟脚本名，如 `python scripts/k.py --workspace smb-ecommerce list-conflicts --json`）。
-> - `Read` / `Edit` 与 `git add` 必须用**带 workspace 的全路径**（如 `Read workspaces/smb-ecommerce/raw/.../<source>.md`）。
+> - `Read` / `Edit` 与 `git add` 必须用带 workspace 的全路径；精确核验优先读取 `derived/.../<source>.md`。
 > - 下文示例为可读性写成裸路径形式（`wiki/...` / `raw/...`），落地执行时一律替换为 `workspaces/<name>/...`，k.py 命令加上 `--workspace <name>`。
 
 **核心原则**（来自 CLAUDE.md）：
@@ -178,7 +178,7 @@ frontmatter `last_modified` 仍要更新（标记本次复核）。
 ```
 
 ```bash
-# 路径用带 workspace 的全路径（默认 workspace 为 smb-ecommerce）；只 add 本次改写涉及的页面
+# 路径用带 workspace 的全路径；只 add 本次改写涉及的页面
 git add workspaces/<name>/wiki/**/*.md workspaces/<name>/log.md
 git commit -m "update: 解决知识库冲突 (<N> 条)"
 ```

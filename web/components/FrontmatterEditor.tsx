@@ -4,7 +4,7 @@ import type { PageFrontmatter } from "@/lib/markdown";
 import { Badge } from "@/components/ui/badge";
 import { useT } from "@/lib/i18n-client";
 
-const TYPE_OPTIONS = ["entity", "concept", "source_summary", "analysis", "comparison", "index"];
+const TYPE_OPTIONS = ["entity", "concept", "source_summary", "analysis", "comparison", "index", "memory"];
 const STATUS_OPTIONS = ["draft", "reviewed", "deprecated"];
 const CONFIDENCE_OPTIONS = ["high", "medium", "low"];
 const MODIFIED_BY_OPTIONS = ["LLM", "Human"];

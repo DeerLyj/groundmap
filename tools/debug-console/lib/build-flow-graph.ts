@@ -23,7 +23,7 @@ export type NodeStatus = "pending" | "ok" | "error";
 
 export type FileType =
   | "concept" | "analysis" | "source" | "entity"
-  | "index" | "raw" | "thoughts" | "unknown";
+  | "index" | "memory" | "raw" | "thoughts" | "unknown";
 
 export interface FlowNodeData {
   key: string;
@@ -143,7 +143,7 @@ function extractWikiRefs(text: string): Array<{ path: string; anchor?: string; i
   // 2. 裸 path —— 至少 wiki/<sub>/<basename> 三段，否则太泛误伤
   //    sub 限定为已知子目录，避免 "wiki/任何" 都被抓
   const bareRe =
-    /\b(wiki\/(?:concepts|analyses|sources|entities|indexes|_templates|_archive_[a-z_]+)\/[A-Za-z0-9_\-一-鿿]+(?:\.md)?|raw\/(?:papers|articles|assets)\/[A-Za-z0-9_\-一-鿿]+(?:\.md)?|wiki\/root_index(?:\.md)?)\b/g;
+    /\b(wiki\/(?:concepts|analyses|sources|entities|indexes|memory|_templates|_archive_[a-z_]+)\/[A-Za-z0-9_\-一-鿿]+(?:\.md)?|raw\/(?:papers|articles|assets)\/[A-Za-z0-9_\-一-鿿]+(?:\.md)?|wiki\/root_index(?:\.md)?)\b/g;
   while ((m = bareRe.exec(text)) !== null) {
     add(m[1]);
   }
@@ -220,7 +220,7 @@ function classifyCall(name: string, args: Record<string, unknown>): {
 }
 
 function normalizeAbsToRel(p: string): string {
-  const m = p.match(/\/(wiki|raw|my_thoughts|exports)\/(.+)$/);
+  const m = p.match(/\/(wiki|raw|derived|my_thoughts|exports)\/(.+)$/);
   if (m) return `${m[1]}/${m[2]}`;
   return p.replace(/\\/g, "/").replace(/^\.?\/+/, "");
 }
@@ -242,8 +242,9 @@ function inferFileType(path?: string): FileType {
   if (path.startsWith("wiki/analyses/")) return "analysis";
   if (path.startsWith("wiki/sources/")) return "source";
   if (path.startsWith("wiki/entities/")) return "entity";
+  if (path.startsWith("wiki/memory/")) return "memory";
   if (path.startsWith("wiki/indexes/") || path === "wiki/root_index.md") return "index";
-  if (path.startsWith("raw/")) return "raw";
+  if (path.startsWith("raw/") || path.startsWith("derived/")) return "raw";
   if (path.startsWith("my_thoughts/")) return "thoughts";
   return "unknown";
 }

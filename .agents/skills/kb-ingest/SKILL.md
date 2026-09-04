@@ -1,30 +1,31 @@
 ---
 name: kb-ingest
-description: 知识库摄入工作流——把 raw/ 中的新来源转换、阅读、综合到 wiki/，更新核心节点，懒标记次要节点，原子提交。当用户提到"摄入"、"导入"、"添加论文/文章到知识库"、"ingest"、"处理新来源"时使用此 skill。
+description: 知识库摄入工作流——只读 raw/ 原件，在 derived/ 建立可重建视图，再综合到 wiki/。当用户提到"摄入"、"导入"、"添加论文/文章到知识库"、"ingest"、"处理新来源"时使用此 skill。
 ---
 
 # 知识库摄入工作流（kb-ingest）
 
 你现在是知识库的 **ingest 专家**。严格遵守以下 10 步流程。
 
-> **Workspace 前提（必读）**：数据层按主题隔离在 `workspaces/<name>/` 下。本文中所有 `wiki/`、`raw/`、`exports/`、`log.md` 路径均**相对于当前 workspace**，实际位于 `workspaces/<name>/`（如 `workspaces/smb-ecommerce/wiki/...`）。
-> - 默认 workspace 为 `smb-ecommerce`，不显式指定时即用它（向后兼容）。
+> **Workspace 前提（必读）**：生产数据推荐放在独立仓并通过 `KB_ROOT` 接入。本文中所有 `wiki/`、`raw/`、`derived/`、`exports/`、`log.md` 路径均相对于当前 workspace。
+> - 不显式指定 workspace 时由 CLI 在当前数据根自动选择；生产任务应显式指定。
 > - `k.py` 用 `--workspace <name>` 指定 workspace（参数紧跟在脚本名后，如 `python scripts/k.py --workspace smb-ecommerce outline <raw_path>`）。
 > - `convert.py` 同样支持 `--workspace <name>`（默认 `smb-ecommerce`，可被 `KB_WORKSPACE` 环境变量覆盖），默认扫 `workspaces/<name>/raw/`；`--dir <path>` 可显式指定任意目录（给出时覆盖 `--workspace`）。
 > - `Read` / `Edit` / `Write` 与 `git add` 必须用**带 workspace 的全路径**（如 `workspaces/smb-ecommerce/wiki/sources/<slug>.md`）。
-> - 下文示例为可读性写成裸路径形式（`raw/...` / `wiki/...`），落地执行时一律替换为 `workspaces/<name>/...`，k.py / convert.py 命令加上 `--workspace <name>`。
+> - 下文示例为可读性写成裸路径形式，落地执行时一律替换为当前数据根下 `workspaces/<name>/...`，并设置 `KB_ROOT`（如需要）。
 
 **先决条件**：用户已经把原始文件放入 `raw/articles/`、`raw/papers/` 或 `raw/assets/`（即 `workspaces/<name>/raw/...`）。如果用户说"摄入这个文件"但还没放进去，先提醒用户把文件放到正确位置再开始。
 
 **核心原则**（来自 CLAUDE.md，必须遵守）：
 - 不修改 `raw/` 中的任何文件（只读它们）
-- 所有实质性论断必须附 `[[raw/...]]` 块级引用
+- 转换文本、OCR、outline、Source Manifest 只写 `derived/`；不得手改生成内容
+- frontmatter `sources` 指向 `raw/` 原件；实质性论断附 `[[derived/...#^anchor]]` 精确引用（旧 raw 锚点继续兼容）
 - 标记 `#to-be-updated` 而不是当场更新所有受影响页面
 - 一次完整 ingest = 一个 git commit
 
 ---
 
-## 第 1 步：转换为 markdown + 生成大纲
+## 第 1 步：建立派生视图与 Source Manifest
 
 无论原始文件是 PDF / DOCX / PPTX / 网页，还是已是 `.md`：
 
@@ -34,16 +35,17 @@ python scripts/convert.py --workspace <name>
 ```
 
 `convert.py` 会自动：
-- 把非文本格式转换为 `.md`
+- 保留 `raw/` 原件，在 `derived/` 生成统一 Markdown 视图
 - 给所有 heading / paragraph / table / code / figure 加稳定锚点（`^h-`/`^p-`/`^t-`/`^c-`/`^f-`）
 - 生成 `.outline.json`（章节树 + 每节首段 200 字预览）
+- 生成 `.source.json`（原件路径、SHA-256、转换器、派生文件哈希与时间）
 
 如果只想处理某 workspace 的某个子目录，用 `--dir` 显式指定（给出时覆盖 `--workspace`）：`python scripts/convert.py --dir workspaces/<name>/raw/papers`。
 
 ## 第 2 步：看大纲，AI 自动决定阅读策略
 
 ```bash
-python scripts/k.py outline raw/papers/<file>.md
+python scripts/k.py --workspace <name> outline derived/papers/<file>.md
 ```
 
 输出会显示：总字符数、章节嵌套树、每节预览（首段抽取）。
@@ -70,11 +72,11 @@ python scripts/k.py outline raw/papers/<file>.md
 
 按 H1 章节顺序切块（必要时合并相邻短章节凑近 30K），每块独立 Read：
 ```bash
-python scripts/k.py read-section raw/papers/<file>.md <anchor>
+python scripts/k.py --workspace <name> read-section derived/papers/<file>.md <anchor>
 ```
 **每段读完立刻** `annotate-section` 精排摘要：
 ```bash
-python scripts/k.py annotate-section raw/papers/<file>.md h-2-3-abc123 "本节论证..."
+python scripts/k.py --workspace <name> annotate-section derived/papers/<file>.md h-2-3-abc123 "本节论证..."
 ```
 最终综合判断（第 3 步）基于**全部章节摘要**，不丢信息。
 
@@ -92,7 +94,7 @@ python scripts/k.py annotate-section raw/papers/<file>.md h-2-3-abc123 "本节�
 
 如果分析中发现需要精确取出某段（比如某个关键数据），调：
 ```bash
-python scripts/k.py read-block raw/papers/<file>.md p-12-7d8e9a
+python scripts/k.py --workspace <name> read-block derived/papers/<file>.md p-12-7d8e9a
 ```
 
 ## 第 3 步：基于 wiki 现状做综合判断
@@ -146,7 +148,7 @@ python scripts/k.py read-section <wiki/concepts/foo.md> h-1-1-<anchor>
 
 三者都是 wiki 页、共享同一套 frontmatter，所以容易混；但它们处在知识流的**不同层**，先按层切再细分：
 
-- **source_summary（来源层）**：一篇 raw = 一页，`source_count` **恰好 1**，`sources:` 指向 `[[raw/...]]`。忠实复述「这一篇说了什么」，不做跨来源综合——第 5 步的产物就是它。
+- **source_summary（来源层）**：一个 raw 原件 = 一页，`source_count` **恰好 1**，`sources:` 指向带扩展名的 `[[raw/...]]` 原件。正文精确论断引用 `[[derived/...#^anchor]]`。
 - **concept / entity（知识节点层）**：跨多篇来源沉淀、长期持续更新的「我们对 X 的认知」，`source_count > 0`（未 ingest 完整来源的占位 stub 例外，须打 `#to-be-updated` 或 `#stub`），`sources:` 常指向 `[[wiki/sources/...]]` 二级摘要而非直接引 raw——第 6 步更新 / 新建的就是它们。
 
 知识节点层里再分 entity 与 concept（二者在 schema / lint 层**完全等价**，区分纯属语义惯例，靠模板结构落地）：
@@ -178,7 +180,7 @@ status: draft                  # LLM 写入一律 draft；reviewed 仅人类审�
 confidence: high               # 看你对来源可信度的判断
 source_count: 1
 sources:
-  - "[[raw/papers/<file>]]"
+  - "[[raw/papers/<file>.<ext>]]"
 tags:
   - <主题标签>
 ---
@@ -186,7 +188,7 @@ tags:
 # <原文标题>
 
 ## 核心论点
-<3-5 个论点，每个都附 anchor 引用：[[raw/papers/<file>#^h-2-3-abc123]] 或 [[raw/papers/<file>#^p-12-7d8e9a]]>
+<3-5 个论点，每个都附 anchor 引用：[[derived/papers/<file>#^h-2-3-abc123]] 或 [[derived/papers/<file>#^p-12-7d8e9a]]>
 
 ## 数据要点
 <关键数据，每条附引用 — 用 ^p- 段级精确指向>
@@ -226,7 +228,7 @@ tags:
 - 优先用 anchor 形式（`#^h-...` / `#^p-...`）而非 heading 文本
 - 整章/整节论证 → `^h-{level}-{seq}-{hash}`
 - 关键数据/精确论断 → `^p-{seq}-{hash}`
-- 不知道 anchor 时调 `python scripts/k.py find-anchor raw/papers/<file>.md "<原文片段>"` 反查
+- 不知道 anchor 时调 `python scripts/k.py --workspace <name> find-anchor derived/papers/<file>.md "<原文片段>"` 反查
 
 校验：
 
@@ -237,7 +239,7 @@ python scripts/k.py validate-frontmatter wiki/sources/<slug>.md
 ## 第 6 步：更新最核心的 2-3 个节点
 
 用 `Edit` 更新最直接受影响的页面（通常 2-3 个）：
-- 在相关 H2/H3 段落新增信息（带 `[[raw/...]]` 引用）
+- 在相关 H2/H3 段落新增信息（带 `[[derived/...#^anchor]]` 引用）
 - 更新 frontmatter 的 `last_modified` 与 `source_count`
 - 在 sources 字段加入新来源
 - **互链相关概念 / 实体**时，凡关系属标准类型即用 `[[目标|SUPPORTS]]` 等标准关系类型（白名单 7 类：`SUPPORTS`/`REFUTES`/`EXTENDS`/`IS_A`/`PART_OF`/`ALTERNATIVE_TO`/`CITES`），让第 9 步的类型化图谱可按边染色；非标准关系仍按显示别名处理
@@ -362,7 +364,8 @@ python scripts/k.py --workspace <name> graph
 
 ```markdown
 ## [2026-04-28] ingest | <来源标题简短>
-- 来源：`raw/papers/<file>.md`
+- 原件：`raw/papers/<file>.<ext>`
+- 派生视图：`derived/papers/<file>.md`
 - 新建：`wiki/sources/<slug>.md`、（如有）`wiki/concepts/<X>.md`
 - 更新：`wiki/concepts/<A>.md`、`wiki/concepts/<B>.md`
 - 标记待更新：<5-10 个文件>
@@ -374,9 +377,9 @@ python scripts/k.py --workspace <name> graph
 
 ```bash
 # 仅 add 本次操作涉及的文件，不要用 git add -A
-# 注意：raw/ 及其派生产物（.md / .outline.json）默认被 .gitignore 排除（版权与隐私原因），
-# 留在本地、不入库——不要 git add 任何 raw 路径（会直接报错 exit 1）
-# 路径用带 workspace 的全路径（默认 workspace 为 smb-ecommerce）
+# 注意：raw/ 原件与 derived/ 派生物默认被 .gitignore 排除（版权与隐私原因），
+# 留在本地、不入公开引擎仓——不要 git add 这些路径
+# 路径用带 workspace 的全路径
 git add workspaces/<name>/wiki/sources/<slug>.md workspaces/<name>/wiki/concepts/<X>.md \
         workspaces/<name>/wiki/indexes/<domain>_index.md workspaces/<name>/log.md
 git commit -m "ingest: <来源标题简短>"
@@ -398,8 +401,8 @@ git commit -m "ingest: <来源标题简短>"
 
 1. 读取目标章节：
    ```bash
-   python scripts/k.py read-section raw/papers/<file>.md <anchor>
-   python scripts/k.py annotate-section raw/papers/<file>.md <anchor> "本节论证..."
+   python scripts/k.py --workspace <name> read-section derived/papers/<file>.md <anchor>
+   python scripts/k.py --workspace <name> annotate-section derived/papers/<file>.md <anchor> "本节论证..."
    ```
 
 2. AI 综合判断该章节相对于 wiki 现状的核心价值（同第 3 步逻辑，但仅针对此章节）
@@ -427,11 +430,11 @@ git commit -m "ingest: <来源标题简短>"
 
 ## 完成检查清单
 
-- [ ] `convert.py` 已对原始文件生成 `.md` + `.outline.json`
+- [ ] `convert.py` 已在 `derived/` 生成 `.md` + `.outline.json` + `.source.json`，且 raw 原件未变化
 - [ ] 中长文档（≥30K 字符，即第 ②/③ 档）通过 `outline` → `read-section` 路线分段读取，不是 Read 全文
 - [ ] 关键章节已 `annotate-section` 回填精排摘要（②③ 档必经；① 档建议性、非硬性）
 - [ ] 摘要页 frontmatter 完整且 `validate-frontmatter` 通过
-- [ ] 所有实质性论断都有 `[[raw/...#^h-...]]` 或 `[[raw/...#^p-...]]` **块级** anchor 引用，没有"裸论断"、没有"整页引用 `[[raw/X]]` 支撑论断"、没有用 heading 文本作引用——`python scripts/k.py list-bare-claims` / `list-coarse-citations` / `list-source-issues` 三者均须为空
+- [ ] 所有实质性论断都有 `[[derived/...#^h-...]]` 或 `[[derived/...#^p-...]]` 块级引用；`sources` 保留 raw 原件链接
 - [ ] `python scripts/k.py list-broken-refs` 没有新增失效引用
 - [ ] 核心节点（2-3 个）已立即更新
 - [ ] 次要节点已标记 `#to-be-updated`
@@ -441,7 +444,7 @@ git commit -m "ingest: <来源标题简短>"
 - [ ] 高频跨篇专名（benchmark / model / org，如 BM25 / MTEB / Llama）已考虑立或更新 `entity` 页（避免重要实体只散落在各 source 页里、无法聚合）
 - [ ] log.md 追加了完整条目
 - [ ] git commit 出现在 `git log` 第一条
-- [ ] commit 包含本次 ingest 的所有应入库文件（wiki 改动 + log.md；raw/ 及其派生 .md/.outline.json 默认被 .gitignore 排除、留在本地），没有无关改动
+- [ ] commit 包含本次 ingest 的所有应入库文件（wiki 改动 + log.md；raw/ 与 derived/ 默认留在数据仓本地），没有无关改动
 
 ## 错误恢复
 
@@ -453,10 +456,9 @@ git commit -m "ingest: <来源标题简短>"
 
 ## 反例（绝对不要做）
 
-- ❌ 修改 `raw/` 中的**原始文件**（pdf/docx/...）。`raw/**/*.md` 与 `*.outline.json` 是 convert.py 派生物，agent **不要用 Read/Edit/Write 手动改它们**；手改了下次 convert 会被覆盖。
-  - **唯一例外**：`k.py annotate-section` 会把精排摘要写入 `.outline.json` 的 `agent_summary` 字段——这是 ②③ 档（分段阅读）ingest 的必经步骤，**允许且必须做**；① 档短文不强制（建议至少给主要 H2 回填一句摘要，非硬性）。区别在于：annotate-section 是通过 k.py 受控写入派生层的特定字段，convert.py 会保留它；而手动 Edit/Write 改 `.md` / `.outline.json` 的其它内容才是被禁止的
+- ❌ 修改 `raw/` 中的任何原件，或手改 `derived/` 生成内容。唯一受控例外是 `k.py annotate-section` 回填 outline 的 `agent_summary`；convert 会保留该字段。
 - ❌ 对 ≥30K 字符的中长文档（第 ②/③ 档）强行 Read 全文（会爆上下文、触发"lost in the middle"衰减）—— 必须走 `outline → read-section` 路线，单次 Read 严格 ≤30K 中文字符
-- ❌ 用 heading 文本作引用（如 `[[raw/foo#方法]]`）—— 必须用 anchor 形式 `[[raw/foo#^h-2-1-abc123]]`
+- ❌ 用 heading 文本作引用（如 `[[derived/foo#方法]]`）——必须用 `[[derived/foo#^h-2-1-abc123]]`
 - ❌ 写实质性论断而不附 anchor 级引用
 - ❌ 一次性更新所有受影响页面（应懒更新，标记 `#to-be-updated`）
 - ❌ 用 `git add -A` 或 `git add .`（可能误提交无关文件）

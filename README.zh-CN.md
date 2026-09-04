@@ -13,7 +13,7 @@ GroundMap 是一个本地优先的知识地图，建立在 Markdown、Git、稳�
 GroundMap 的出发点不同：
 
 - 知识应该保持人类可读。
-- Markdown + Git 应该始终是唯一真相源。
+- 原始文件不可变，Markdown + Git 应该始终是可审计的长期真相源。
 - agent 应该读完整页面或完整章节，而不是任意 chunk。
 - 每条重要论断都应该指回一个稳定的来源锚点。
 - 知识库本身不应该调用 LLM。
@@ -23,8 +23,8 @@ GroundMap 的出发点不同：
 ## 核心理念
 
 - **默认不用 embedding**：检索依赖 BM25 风格全文搜索、元数据、反链、出链和完整页面阅读。
-- **稳定锚点**：转换后的原始文档带有 `^h-*`、`^p-*`、`^t-*` 等块级锚点，论断可以精确引用到来源块。
-- **Markdown 是真相源**：SQLite / 缓存层都是可选的派生索引，可随时重建。
+- **稳定锚点**：`derived/` 中的转换文本带有 `^h-*`、`^p-*`、`^t-*` 等块级锚点，论断可以精确引用到来源块。
+- **分层真相**：`raw/` 保存不可变原件，`wiki/` 保存可审阅知识；`derived/` 与缓存均可重建。
 - **agent 在外，知识库在内**：仓库只提供脚本、模板和 Web 管理台；LLM 推理发生在外部 agent。
 - **Git 原生治理**：所有有意义的改动都是普通 commit，可评审、可回滚、可审计、可讨论。
 - **人类专属区受保护**：`raw/**`、`my_thoughts/**`、`#human-only`、`locked: true` 文件由规范和 Git hooks 共同保护。
@@ -69,11 +69,11 @@ make web
 
 然后打开 [http://localhost:3006](http://localhost:3006)。
 
-> 📦 **示例 workspace 的 `raw/` 原始资料不随仓库分发**（版权原因；`workspaces/*/raw/` 已被 `.gitignore` 排除）。示例 workspace 的 `wiki/` 页面是完整随仓分发的，可以正常浏览。fresh clone 后 `k.py health` 会报告非零的 **失效引用**（示例库里的"raw 文件不存在"）和 **source 问题**（`broken-source-link`：`source_summary` 页引用的 `[[raw/...]]` 来源块不存在）——**两者都属预期现象，不代表安装失败**，本质是同一个「raw 不在场」造成的，只是指向缺失 raw 来源块的深链无法解析。想体验完整的「转换 → 引用」闭环，把你自己的文档放进某个 workspace 的 `raw/` 即可。
+> 📦 **示例 workspace 的 `raw/` 原始资料与 `derived/` 派生物不随仓库分发**（版权原因；两者均被 `.gitignore` 排除）。示例 workspace 的 `wiki/` 页面仍可浏览。fresh clone 后，旧示例页可能报告来源引用失效；这是示例原文未分发造成的预期结果，不代表安装失败。
 
 ## 用自己的资料建立知识库
 
-真实使用时，推荐流程是：把 GroundMap clone 下来作为引擎，自己先准备好原始资料，创建一个新的 workspace，然后让 Claude Code、Codex 或其他代码智能体把这些资料 ingest 进知识库。
+真实使用时，GroundMap 仓库只作为引擎；私人或生产数据放在独立 Git 仓中，通过 `KB_ROOT` 接入。`raw/` 存原件，转换结果进入 `derived/`，审核后的知识进入 `wiki/`。
 
 如果资料有隐私或版权风险，建议不要把数据直接放进公开引擎仓库，而是用 `KB_ROOT` 指向一个独立的私有数据目录：
 
@@ -124,7 +124,7 @@ cd web && npm run lint && npm run build
 
 ## 多工作区模型
 
-引擎代码（`scripts/`、`web/`）一套通用，数据按主题隔离在 `workspaces/<name>/` 下，每个 workspace 内部结构相同：`wiki/`、`raw/`、`exports/`、`my_thoughts/`、`.cache/`、`log.md`。不指定 workspace 时 CLI 自动选用一个（库多时会打印提示）；用 `--workspace` 指定。
+引擎代码（`scripts/`、`web/`）一套通用，数据按主题隔离在 `workspaces/<name>/` 下，每个 workspace 内部结构相同：`raw/`、`derived/`、`wiki/`、`exports/`、`my_thoughts/`、`.cache/`、`log.md`。本仓 workspace 仅用于公开示例、测试和兼容；生产数据推荐通过 `KB_ROOT` 接入。
 
 ```bash
 # 不带 --workspace：自动选用一个 workspace（库多时打印提示）
@@ -149,7 +149,7 @@ KB_ROOT=~/work/项目A/kb-data python ~/tools/groundmap/scripts/k.py --workspace
 cd ~/tools/groundmap/web && KB_ROOT=~/work/项目A/kb-data KB_WORKSPACE=main npm run dev
 ```
 
-`KB_ROOT` 指向**含 `workspaces/` 的那层**（如 `<项目>/kb-data`），不是某个具体 workspace；`--workspace` / `KB_WORKSPACE` 再选项目内的库。未设时默认 = 引擎仓库自身（即上面的多主题模式）。数据放各项目自己文件夹里，引擎才能保持纯代码——可共享、可升级、开源时不泄露任何项目数据。完整部署模型见 `GroundMap-设计文档.md` §2.4。
+`KB_ROOT` 指向**含 `workspaces/` 的那层**（如 `<项目>/kb-data`），不是某个具体 workspace；`--workspace` / `KB_WORKSPACE` 再选项目内的库。未设置时回退到引擎仓库自身，仅用于示例、测试和向后兼容。完整部署模型见 `GroundMap-设计文档.md` §2.4。
 
 ## 常用命令
 
@@ -182,10 +182,11 @@ npm run dev
 ├── .claude/skills/           # Claude Code 工作流技能（kb-ingest / query / lint / export / conflict-resolve）
 ├── .agents/skills/           # 上述技能的 Codex 镜像
 ├── wiki/_templates/          # 共享页面模板（所有 workspace 共用）
-├── workspaces/               # 按主题隔离的数据，可切换；自带 smb-ecommerce / rag-evolution / ai-ml-demo 示例库
+├── workspaces/               # 公开示例与测试数据；生产数据通过 KB_ROOT 接入
 │   └── <name>/
 │       ├── wiki/             # Markdown wiki 页面（root_index、indexes、concepts、entities、sources、analyses）
-│       ├── raw/              # 原始文档与转换后的 markdown（articles、papers、assets）
+│       ├── raw/              # 不可变原始文档（articles、papers、assets）
+│       ├── derived/          # 转换文本、OCR、outline 与 Source Manifest（可重建）
 │       ├── exports/          # 生成的输出物
 │       ├── my_thoughts/      # 人类专属区（agent 只读）
 │       ├── .cache/           # 派生 SQLite 索引（gitignored，可重建）

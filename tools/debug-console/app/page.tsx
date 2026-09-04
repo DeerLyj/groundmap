@@ -34,6 +34,8 @@ export default function Page() {
   // 要查的库：?ws 参数（web 顶栏点进来时带，反映 web 当前所在库）> web 当前默认库。
   // 控制台是 web 的外部客户端，**不**提供独立切换——避免控制台查的库与 web 浏览的库不一致。
   const [workspace, setWorkspace] = useState<string | null>(null);
+  const [projects, setProjects] = useState<Array<{ project_id: string; status?: string }>>([]);
+  const [projectId, setProjectId] = useState<string | null>(null);
 
   const openRef = (r: WikiRef) => {
     setPreviewNode(null);
@@ -79,6 +81,30 @@ export default function Page() {
       });
   }, []);
 
+  useEffect(() => {
+    const fromUrl = new URLSearchParams(window.location.search).get("project");
+    const PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
+    const query = workspace ? `?ws=${encodeURIComponent(workspace)}` : "";
+    fetch(`/api/projects${query}`)
+      .then((r) => r.json())
+      .then((d: { ok?: boolean; data?: unknown }) => {
+        const list = d.ok && Array.isArray(d.data)
+          ? (d.data as Array<{ project_id?: unknown; status?: unknown }>)
+              .filter((p): p is { project_id: string; status?: string } =>
+                typeof p.project_id === "string" && PROJECT_RE.test(p.project_id),
+              )
+          : [];
+        setProjects(list);
+        setProjectId(
+          fromUrl && list.some((p) => p.project_id === fromUrl) ? fromUrl : null,
+        );
+      })
+      .catch(() => {
+        setProjects([]);
+        setProjectId(null);
+      });
+  }, [workspace]);
+
   return (
     <main className="kc-stage flex h-screen flex-col">
       {/* ─── 顶栏 chrome ─── */}
@@ -104,6 +130,26 @@ export default function Page() {
 
           <div className="flex flex-wrap items-end gap-x-5 gap-y-3">
             <WorkspaceIndicator value={workspace} />
+            <div className="flex flex-col gap-1">
+              <label className="k-eyebrow" htmlFor="project-picker">
+                {t("picker.project")}
+              </label>
+              <select
+                id="project-picker"
+                value={projectId || ""}
+                onChange={(e) => setProjectId(e.target.value || null)}
+                className="k-input max-w-56"
+                title={t("picker.project_tip")}
+                disabled={!projects.length}
+              >
+                <option value="">{projects.length ? t("picker.project_none") : t("picker.loading")}</option>
+                {projects.map((project) => (
+                  <option key={project.project_id} value={project.project_id}>
+                    {project.project_id}{project.status ? ` · ${project.status}` : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
             <ProviderPicker
               provider={provider}
               model={model}
@@ -210,6 +256,7 @@ export default function Page() {
             toolBudget={toolBudget}
             mode={mode}
             workspace={workspace}
+            projectId={projectId}
             onOpenRef={openRef}
             onOpenNode={openNode}
           />

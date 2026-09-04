@@ -7,17 +7,19 @@ description: 知识库查询工作流——像研究员一样按 root_index → 
 
 你现在是知识库的 **研究员**。像人类查资料一样，按层级钻取、顺藤摸瓜，**绝不切片+embedding**。
 
-> **Workspace 前提（必读）**：数据层按主题隔离在 `workspaces/<name>/` 下。本文中所有 `wiki/`、`raw/`、`exports/`、`log.md` 路径均**相对于当前 workspace**，实际位于 `workspaces/<name>/`（如 `workspaces/smb-ecommerce/wiki/root_index.md`）。
-> - 默认 workspace 为 `smb-ecommerce`，不显式指定时即用它。
+> **Workspace 前提（必读）**：生产数据推荐通过 `KB_ROOT` 接入。本文中的 `wiki/`、`raw/`、`derived/`、`exports/`、`log.md` 均相对于当前 workspace。
+> - 生产任务应显式指定 workspace；未指定时 CLI 自动选择当前数据根中的 workspace。
 > - `k.py` 用 `--workspace <name>` 指定 workspace（参数紧跟脚本名，如 `python scripts/k.py --workspace smb-ecommerce search "<关键词>"`）。
 > - `Read` / `Write` 与 `git add` 必须用**带 workspace 的全路径**（如 `Read workspaces/smb-ecommerce/wiki/root_index.md`）。
 > - 下文示例为可读性写成裸路径形式（`wiki/...` / `raw/...`），落地执行时一律替换为 `workspaces/<name>/...`，k.py 命令加上 `--workspace <name>`。
 
 **核心原则**（来自 CLAUDE.md）：
 - 永远读完整页面或完整 H2/H3 段，不读 chunk
-- 优先 wiki/（已编译的综合判断），其次 raw/
+- 优先 `wiki/`（已审阅/待审知识），需要精确核验时读 `derived/`；`raw/` 只保存原件身份
 - 回答必须附引用清单
 - 有价值的综合分析必须归档（探索复利）
+
+**证据范围由外部 agent/client 控制**：`local` 只使用本地知识库；`hybrid` 必须先完成本地检索，再调用外部 Web 搜索，并在答案中分开列出本地与外部来源。Web 结果未经摄入和审核不得自动写入长期知识。GroundMap 核心本身不联网。
 
 ---
 
@@ -115,7 +117,7 @@ Read wiki/sources/<X>.md
 **触发 partial re-ingest 升级**：
 
 1. 切到 kb-ingest skill 的「增量深化」子流程
-2. 升级目标：`raw/.../<file>.md` 的对应 `^h-` anchor
+2. 升级目标：`derived/.../<file>.md` 的对应 `^h-` anchor
 3. 触发原因：`query 命中关键词「<X>」但原扫读未深入`
 4. 升级完成后回到本流程，**重新** `Read` 已更新的 source_summary 与受影响 wiki 页，再综合回答
 
@@ -142,8 +144,8 @@ Read wiki/sources/<X>.md
 **动作**：
 
 ```bash
-python scripts/k.py read-block raw/papers/<file>.md <anchor>     # 取精确段（^p- / ^t-）
-python scripts/k.py read-section raw/papers/<file>.md <anchor>   # 取完整 H2/H3 章节（^h-）
+python scripts/k.py read-block derived/papers/<file>.md <anchor>     # 取精确段（^p- / ^t-）
+python scripts/k.py read-section derived/papers/<file>.md <anchor>   # 取完整 H2/H3 章节（^h-）
 ```
 
 - 原文支撑论断 → 用核验过的措辞作答，锚点照常进引用清单
@@ -191,7 +193,7 @@ python scripts/k.py list-conflicts --json   # 看有没有相关冲突
 ## 详细分析
 
 ### <主题 1>
-<分析内容> [[wiki/concepts/<X>]] [[raw/papers/<Y>#^block-id]]
+<分析内容> [[wiki/concepts/<X>]] [[derived/papers/<Y>#^block-id]]
 
 ### <主题 2>
 ...
@@ -202,7 +204,7 @@ python scripts/k.py list-conflicts --json   # 看有没有相关冲突
 ## 引用清单
 - [[wiki/concepts/<A>]]
 - [[wiki/sources/<B>]]
-- [[raw/papers/<C>#^block-id]]
+- [[derived/papers/<C>#^block-id]]
 ```
 
 **约束**：
@@ -218,10 +220,10 @@ quick 流程组合答案后，**回头校验每条 anchor 引用是否真的支�
 
 ### 流程
 
-1. 从答案里提取所有 `[[raw/...#^p-N-hash]]` / `[[raw/...#^h-N-N-hash]]` 引用（典型 3-10 条）
+1. 从答案里提取所有 `[[derived/...#^p-N-hash]]` / `[[derived/...#^h-N-N-hash]]` 引用（典型 3-10 条）
 2. 对每条引用：
    ```bash
-   python scripts/k.py read-block raw/articles/<file>.md <anchor>
+   python scripts/k.py read-block derived/articles/<file>.md <anchor>
    ```
 3. 把"agent 论断"与"原文段落"**逐条比对**：
    - 关键事实（日期 / 数字 / 主体）是否在原文里？
@@ -396,7 +398,7 @@ tags:
 最后：
 
 ```bash
-# 路径用带 workspace 的全路径（默认 workspace 为 smb-ecommerce）
+# 路径用带 workspace 的全路径
 git add workspaces/<name>/wiki/analyses/<slug>.md workspaces/<name>/log.md
 git commit -m "query: <分析主题>"
 ```

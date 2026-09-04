@@ -25,6 +25,8 @@ const NAV_ITEMS: { href: string; labelKey: Parameters<ReturnType<typeof useT>>[0
   { href: "/", labelKey: "nav.browse" },
   { href: "/health", labelKey: "nav.health" },
   { href: "/graph", labelKey: "nav.graph" },
+  { href: "/memory", labelKey: "nav.memory" },
+  { href: "/projects", labelKey: "nav.projects" },
 ];
 
 export function TopHeader() {

@@ -16,12 +16,14 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from collections import namedtuple
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 
 def _atomic_write_text(target: Path, content: str, encoding: str = "utf-8") -> None:
@@ -99,6 +101,13 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from section_parser import ANCHOR_TAIL_RE, split_blocks
 from postprocess import build_outline_data
+from context_pack import (
+    ProjectDataError,
+    build_and_write,
+    confirm_project_record,
+    list_projects as list_project_states,
+    load_project,
+)
 
 
 # ============================================================
@@ -279,6 +288,22 @@ def load_all_wiki_pages():
     return pages
 
 
+def load_search_pages():
+    """加载搜索候选：已整理的 wiki 页面 + 可重建的 derived Markdown。"""
+    pages = load_all_wiki_pages()
+    derived_dir = PROJECT_ROOT / "derived"
+    if not derived_dir.exists():
+        return pages
+
+    for md_file in derived_dir.rglob("*.md"):
+        if md_file.name.startswith("."):
+            continue
+        page = Page.from_file(md_file)
+        if page:
+            pages.append(page)
+    return pages
+
+
 Wikilink = namedtuple("Wikilink", ["target", "anchor", "alias", "relation"])
 
 
@@ -374,22 +399,64 @@ def _is_exempt(page) -> bool:
 # 搜索
 # ============================================================
 
-def search_pages(query, pages, limit=20):
-    """关键词搜索：标题命中 ×5、正文命中 ×1，按总分降序"""
+SEARCH_CJK_RE = re.compile(r"[\u3400-\u9fff]+")
+SEARCH_TOKEN_RE = re.compile(
+    r"[a-z0-9]+(?:[._/-][a-z0-9]+)*|[\u3400-\u9fff]+",
+    re.IGNORECASE,
+)
+GENERATED_MEDIA_RE = re.compile(
+    r"<!-- groundmap:embedded-media:start -->.*?"
+    r"<!-- groundmap:embedded-media:end -->",
+    re.DOTALL,
+)
+GENERATED_EMBEDDED_OCR_RE = re.compile(
+    r"<!-- groundmap:embedded-ocr:start -->.*?"
+    r"<!-- groundmap:embedded-ocr:end -->",
+    re.DOTALL,
+)
+
+
+def _search_terms(query):
+    """英文沿用空格切词；中文连续文本展开为可解释的二元字符片段。"""
     query_lower = query.lower()
-    terms = [t for t in query_lower.split() if t]
+    if not SEARCH_CJK_RE.search(query_lower):
+        return [term for term in query_lower.split() if term]
+
+    terms = []
+    for token in SEARCH_TOKEN_RE.findall(query_lower):
+        if SEARCH_CJK_RE.fullmatch(token) and len(token) > 2:
+            terms.extend(token[i:i + 2] for i in range(len(token) - 1))
+        else:
+            terms.append(token)
+    return list(dict.fromkeys(terms))
+
+
+def search_pages(query, pages, limit=20):
+    """关键词搜索：标题 ×5、Wiki 正文 ×1、derived 正文 ×2；中文支持二元字符召回。"""
+    terms = _search_terms(query)
     if not terms:
         return []
+    uses_cjk = bool(SEARCH_CJK_RE.search(query))
 
     results = []
     for page in pages:
         title_lower = page.title.lower()
-        content_lower = page.raw_content.lower()
+        search_content = GENERATED_MEDIA_RE.sub("", page.raw_content)
+        search_content = GENERATED_EMBEDDED_OCR_RE.sub("", search_content)
+        content_lower = search_content.lower()
+        body_weight = 2 if uses_cjk and page.path.startswith("derived/") else 1
 
         score = 0
         for term in terms:
-            score += title_lower.count(term) * 5
-            score += content_lower.count(term)
+            if uses_cjk:
+                # 中文二元片段在长文中容易重复；每个词项每个字段只计一次，
+                # 让排序反映覆盖了多少查询概念，而不是文档有多长。
+                score += 5 if term in title_lower else 0
+                score += body_weight if term in content_lower else 0
+            else:
+                # 非中文查询保留原有计分行为，避免改变既有英文搜索语义。
+                score += title_lower.count(term) * 5
+                score += content_lower.count(term)
 
         if score > 0:
             snippet = ""
@@ -398,7 +465,7 @@ def search_pages(query, pages, limit=20):
                 if idx >= 0:
                     start = max(0, idx - 60)
                     end = min(len(content_lower), idx + 120)
-                    snippet = page.raw_content[start:end].replace("\n", " ").strip()
+                    snippet = search_content[start:end].replace("\n", " ").strip()
                     if start > 0:
                         snippet = "..." + snippet
                     if end < len(content_lower):
@@ -864,7 +931,7 @@ def list_implicit_relations(pages) -> list[dict]:
             plain_links: list[str] = []
             for m in WIKILINK_RE.finditer(scan_text):
                 target = m.group(1) or ""
-                if target.startswith("raw/"):
+                if target.startswith(("raw/", "derived/")):
                     continue
                 _, relation = split_alias_or_relation(m.group(3))
                 if relation:
@@ -972,6 +1039,73 @@ def health_report(pages, backlinks):
     }
 
 
+def obsidian_integration_report(pages) -> dict:
+    """检查当前 workspace 是否可直接作为 Obsidian Vault 使用。
+
+    这是只读诊断：不创建 .obsidian、不初始化 Git、不修改 Markdown。
+    Obsidian 本身不要求 .obsidian 目录存在，首次打开 Vault 时会自动生成。
+    """
+    required_dirs = {
+        name: (PROJECT_ROOT / name).is_dir()
+        for name in ("wiki", "raw", "derived", "exports", "my_thoughts")
+    }
+    required_files = {
+        rel: (PROJECT_ROOT / rel).is_file()
+        for rel in ("wiki/root_index.md", "log.md")
+    }
+
+    git_root = None
+    git_error = None
+    try:
+        git = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
+        )
+        if git.returncode == 0:
+            git_root = git.stdout.strip()
+        else:
+            git_error = (git.stderr or "未检测到 Git 仓库").strip()
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+        git_error = str(exc)
+
+    backlinks = build_link_graph(pages)
+    health = health_report(pages, backlinks)
+    missing = [
+        *[f"目录 {name}" for name, exists in required_dirs.items() if not exists],
+        *[f"文件 {rel}" for rel, exists in required_files.items() if not exists],
+    ]
+    warnings = []
+    if git_root is None:
+        warnings.append("未检测到 Git 仓库；Obsidian 与 GroundMap 仍可读写，但无法可靠版本管理")
+    if health.get("broken_refs_count", 0):
+        warnings.append(f"当前 Wiki 有 {health['broken_refs_count']} 条失效引用")
+
+    root_index = PROJECT_ROOT / "wiki" / "root_index.md"
+    return {
+        "ok": not missing,
+        "workspace_root": str(PROJECT_ROOT),
+        "vault_path": str(PROJECT_ROOT),
+        "root_index_path": str(root_index),
+        "root_index_uri": f"obsidian://open?path={quote(str(root_index), safe='')}",
+        "required_dirs": required_dirs,
+        "required_files": required_files,
+        "git": {"root": git_root, "error": git_error},
+        "wiki_pages": len(pages),
+        "health": {
+            "conflicts_count": health.get("conflicts_count", 0),
+            "broken_refs_count": health.get("broken_refs_count", 0),
+            "source_issues_count": health.get("source_issues_count", 0),
+            "to_update_count": health.get("to_update_count", 0),
+        },
+        "warnings": warnings,
+    }
+
+
 # ============================================================
 # Frontmatter 校验
 # ============================================================
@@ -981,7 +1115,10 @@ REQUIRED_FIELDS = [
     "last_modified_by", "status", "confidence",
     "source_count", "sources", "tags",
 ]
-VALID_TYPES = {"entity", "concept", "source_summary", "analysis", "comparison", "index"}
+# memory = user-confirmed personal operating memory (preferences / goals / decisions).
+# It is intentionally outside CLAIM_TYPES below: memory may be sourced from a
+# reviewed conversation rather than a raw research document.
+VALID_TYPES = {"entity", "concept", "source_summary", "analysis", "comparison", "index", "memory"}
 VALID_STATUS = {"draft", "reviewed", "deprecated"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
 VALID_MODIFIED_BY = {"LLM", "Human"}
@@ -1115,7 +1252,7 @@ def list_index_count_mismatches(pages) -> list[dict]:
 
 
 def _resolve_source_entry(src: str) -> tuple[bool, str | None]:
-    """解析 sources[] 里的一条字符串（典型如 "[[wiki/sources/X]]" 或 "[[raw/papers/X]]"），
+    """解析 sources[] 里的一条字符串（如 "[[wiki/sources/X]]" 或 "[[raw/papers/X.pdf]]"），
     返回 (target_file_exists, resolved_md_path)。
 
     非 wikilink 字符串（纯文本 caption 等）返回 (True, None) — 无法校验，跳过。
@@ -1123,22 +1260,25 @@ def _resolve_source_entry(src: str) -> tuple[bool, str | None]:
     links = parse_wikilinks(src)
     if not links:
         return True, None
-    target_norm = normalize_link_target(links[0].target)
+    direct_target = links[0].target.strip()
+    if (PROJECT_ROOT / direct_target).is_file():
+        return True, direct_target
+    target_norm = normalize_link_target(direct_target)
     full_path = PROJECT_ROOT / target_norm
     return full_path.exists(), target_norm
 
 
 def _has_block_citation(content: str) -> bool:
-    """检查文本是否含"块级引用"——即足以把论断 ground 到 raw 的引用形式：
-    - [[raw/...]]（任意，有/无 anchor）
+    """检查文本是否含足以把论断定位到来源的引用形式：
+    - [[raw/...]] 或 [[derived/...]]（任意，有/无 anchor）
     - 任意带 ^anchor 的 wikilink（[[wiki/sources/X#^p-N-...]] 也算）
     其他形式（如 [[wiki/concepts/Y]] 无 anchor 的内部交叉引用）不算块级。
 
-    先 mask_code_spans 剥离代码块 / 行内代码——代码示例里的 [[raw/...]] 不能
+    先 mask_code_spans 剥离代码块 / 行内代码——代码示例里的来源链接不能
     被当作真实的论断溯源（否则 declared-but-uncited 会漏报）。
     """
     for link in parse_wikilinks(mask_code_spans(content)):
-        if link.target.startswith("raw/"):
+        if link.target.startswith(("raw/", "derived/")):
             return True
         if link.anchor and link.anchor.startswith("^"):
             return True
@@ -1155,7 +1295,7 @@ def list_source_count_issues(pages) -> list[dict]:
     4. source-summary-mismatch — type=source_summary 但 source_count != 1
     5. broken-source-link — sources 数组中某条链接目标文件不存在
     6. declared-but-uncited — type ∈ CLAIM_TYPES 且 source_count > 0
-       但正文没有任何 [[raw/...]] / [[*#^*]] 块级引用
+       但正文没有任何 [[raw/...]] / [[derived/...]] / [[*#^*]] 块级引用
        （frontmatter 声明了 source 但正文论断没真的 anchor 到它——属于语义层缺陷）
 
     豁免（_is_exempt：status==deprecated 或 _archive 归档区）：
@@ -1222,7 +1362,7 @@ def list_source_count_issues(pages) -> list[dict]:
                     "declared_count": page.source_count,
                     "actual_len": actual_len,
                     "detail": "",
-                    "suggestion": "source_summary 应绑定恰好 1 个 raw 来源；如确实多来源汇总，改用 type=analysis",
+                        "suggestion": "source_summary 应绑定恰好 1 个 raw 原件；如确实多来源汇总，改用 type=analysis",
                 })
             continue  # source_summary 不参与下面的论断型规则
 
@@ -1245,7 +1385,7 @@ def list_source_count_issues(pages) -> list[dict]:
                     "declared_count": 0,
                     "actual_len": 0,
                     "detail": "",
-                    "suggestion": "补充 source（ingest 一个 raw 并加入 sources 数组），或加 #to-be-updated / stub 标签明示未完成",
+                    "suggestion": "补充 source（摄入一个 raw 原件并加入 sources 数组），或加 #to-be-updated / stub 标签明示未完成",
                 })
             # source_count == 0 → 不需要做 Rule 3 / 6 检查
             continue
@@ -1272,11 +1412,83 @@ def list_source_count_issues(pages) -> list[dict]:
                 "issue_type": "declared-but-uncited",
                 "declared_count": page.source_count,
                 "actual_len": actual_len,
-                "detail": f"frontmatter 声明 source_count: {page.source_count} 但正文无 [[raw/...]] 或 [[*#^*]] 块级引用",
-                "suggestion": "在论断段落补 [[raw/<file>#^<anchor>]] 或 [[wiki/sources/<X>#^<anchor>]] 引用；用 k.py find-anchor 反查 anchor",
+                "detail": f"frontmatter 声明 source_count: {page.source_count} 但正文无来源块级引用",
+                "suggestion": "在论断段落补 [[derived/<file>#^<anchor>]] 或 [[wiki/sources/<X>#^<anchor>]] 引用；用 k.py find-anchor 反查 anchor",
             })
 
     return issues
+
+
+def list_stale_ingests(pages, include_untracked: bool = False) -> list[dict]:
+    """Compare source-summary ingest fingerprints with current derived manifests."""
+    items = []
+    for page in pages:
+        if page.type != "source_summary" or len(page.sources) != 1:
+            continue
+        links = parse_wikilinks(page.sources[0])
+        if not links:
+            continue
+        source_target = links[0].target.strip().replace("\\", "/")
+        if not source_target.startswith("raw/"):
+            continue
+
+        try:
+            meta = frontmatter.load(PROJECT_ROOT / page.path).metadata
+        except Exception:
+            continue
+        ingested_source_id = meta.get("source_id")
+        ingested_derived_sha256 = meta.get("ingested_derived_sha256")
+        ingested_pipeline_version = meta.get("ingested_pipeline_version")
+        ingested_audio_pipeline_version = meta.get("ingested_audio_pipeline_version")
+
+        derived_rel = Path(source_target).relative_to("raw").with_suffix(".source.json")
+        manifest_path = PROJECT_ROOT / "derived" / derived_rel
+        manifest_rel = str(manifest_path.relative_to(PROJECT_ROOT)).replace("\\", "/")
+        manifest = None
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                manifest = None
+
+        reasons = []
+        if not ingested_source_id or not ingested_derived_sha256:
+            if include_untracked:
+                reasons.append("tracking_missing")
+        elif manifest is None:
+            reasons.append("manifest_missing")
+        else:
+            if ingested_source_id != manifest.get("source_id"):
+                reasons.append("source_changed")
+            if ingested_derived_sha256 != manifest.get("derived_sha256"):
+                reasons.append("derived_changed")
+            if (
+                ingested_pipeline_version is not None
+                and ingested_pipeline_version != manifest.get("pipeline_version")
+            ):
+                reasons.append("pipeline_changed")
+            if (
+                ingested_audio_pipeline_version is not None
+                and ingested_audio_pipeline_version
+                != manifest.get("audio_pipeline_version")
+            ):
+                reasons.append("audio_pipeline_changed")
+        if not reasons:
+            continue
+        items.append(
+            {
+                "path": page.path,
+                "title": page.title,
+                "source_path": source_target,
+                "manifest_path": manifest_rel,
+                "reasons": reasons,
+                "ingested_source_id": ingested_source_id,
+                "current_source_id": manifest.get("source_id") if manifest else None,
+                "ingested_derived_sha256": ingested_derived_sha256,
+                "current_derived_sha256": manifest.get("derived_sha256") if manifest else None,
+            }
+        )
+    return items
 
 
 def validate_frontmatter(file_path):
@@ -1368,7 +1580,7 @@ def validate_frontmatter(file_path):
 # ============================================================
 
 ANCHOR_RE_INLINE = re.compile(r"\^([hpcft]-\d+(?:-\d+)?-[a-z0-9]+(?:-\d+)?)")
-RAW_REF_PREFIX_RE = re.compile(r"^raw/", re.IGNORECASE)
+RAW_REF_PREFIX_RE = re.compile(r"^(?:raw|derived)/", re.IGNORECASE)
 
 # ========== 裸论断扫描（list-bare-claims） ==========
 # "实质性数据论断"模式：高信号、低噪音
@@ -1390,12 +1602,12 @@ NUMERIC_CLAIM_PATTERNS = [
 #   - [[raw/...]]      直接溯源
 #   - [[wiki/sources/...]]  经 source_summary 中介（合法）
 #   - [需要来源]       显式占位
-REFERENCE_SUPPORT_RE = re.compile(r"\[\[raw/|\[\[wiki/sources/|\[需要来源\]")
+REFERENCE_SUPPORT_RE = re.compile(r"\[\[(?:raw|derived)/|\[\[wiki/sources/|\[需要来源\]")
 
 # 整页 raw 引用（无 #^anchor、无 |别名）vs 块级 raw 引用（含 #^）——
 # 用于 list-coarse-citations：论断只挂整页引用、未精确到块时报「引用粒度不足」。
-RAW_PAGE_CITE_RE = re.compile(r"\[\[raw/[^\]\|#]+\]\]")
-RAW_BLOCK_CITE_RE = re.compile(r"\[\[raw/[^\]]*#\^")
+RAW_PAGE_CITE_RE = re.compile(r"\[\[(?:raw|derived)/[^\]\|#]+\]\]")
+RAW_BLOCK_CITE_RE = re.compile(r"\[\[(?:raw|derived)/[^\]]*#\^")
 
 # 跳过 callout / 表格行：典型 false positive 来源
 # - [!WARNING] / [!NOTE] / [!TIP] 等 callout 多为 recap 性质，原引用在外围段
@@ -1481,7 +1693,7 @@ def resolve_doc_path(arg: str) -> Path:
         回到 PROJECT_ROOT 之外的相对路径，防止 web 端 ?path= 触发的路径遍历。
       - 拒绝 my_thoughts/ 下的目标——人类专属区不可被读路径（outline / blocks /
         read-section / read-block 等）暴露内容（CLAUDE.md：my_thoughts 只读且不暴露）。
-        允许 wiki/ 与 raw/。
+        允许 wiki/、raw/ 与 derived/。
     """
     if Path(arg).is_absolute():
         raise ValueError(f"路径越界（拒绝绝对路径）：{arg}")
@@ -1860,8 +2072,7 @@ def list_broken_refs(pages) -> list[dict]:
     """扫描 wiki/ 所有页面里带 ^anchor 的双链，列出失效的引用。
 
     覆盖两类目标：
-      - [[raw/...#^anchor]]   — raw 文件不存在 / anchor 不存在（raw 有 outline，但
-        anchor 集合直接从 .md 扫，与 wiki 同路）
+      - [[raw/...#^anchor]] / [[derived/...#^anchor]] — 来源文件或 anchor 不存在
       - [[wiki/...#^anchor]]  — wiki 文件不存在 / anchor 不存在（wiki 页无 outline.json，
         用 _collect_anchors_in_md 直扫目标 .md 的锚点集合判断）
 
@@ -1870,7 +2081,7 @@ def list_broken_refs(pages) -> list[dict]:
     """
     out = []
     # 目标 .md 路径（rel）→ 其锚点集合，避免重复扫盘
-    anchor_cache: dict[str, set[str]] = {}          # raw 目标：内联锚点集合
+    anchor_cache: dict[str, set[str]] = {}          # raw/derived 目标：内联锚点集合
     resolvable_cache: dict[str, tuple] = {}          # wiki 目标：read_block 同口径的可解析索引
 
     for page in pages:
@@ -1882,9 +2093,9 @@ def list_broken_refs(pages) -> list[dict]:
             if not anchor or not anchor.startswith("^"):
                 continue
             target_norm = normalize_link_target(target)
-            is_raw = bool(RAW_REF_PREFIX_RE.match(target_norm))
+            is_source = bool(RAW_REF_PREFIX_RE.match(target_norm))
             is_wiki = bool(WIKI_REF_PREFIX_RE.match(target_norm))
-            if not is_raw and not is_wiki:
+            if not is_source and not is_wiki:
                 continue
             # 拒绝越界目标（[[raw/../etc/passwd]]）——既不打开也不报告
             doc_path = _safe_join_under_root(target_norm)
@@ -1892,7 +2103,7 @@ def list_broken_refs(pages) -> list[dict]:
                 continue
             anchor_id = anchor.lstrip("^")
             line = page.raw_content[: m.start()].count("\n") + 1
-            kind_label = "raw" if is_raw else "wiki"
+            kind_label = target_norm.split("/", 1)[0] if is_source else "wiki"
             reason = None
             if not doc_path.exists():
                 reason = f"{kind_label} 文件不存在"
@@ -1921,7 +2132,7 @@ def list_broken_refs(pages) -> list[dict]:
 
 
 def _collect_section_summary_index(raw_path_rel: str) -> dict[str, dict] | None:
-    """读 raw 的 .outline.json，递归收集所有 heading section 的元信息。
+    """读来源文档的 .outline.json，递归收集所有 heading section 的元信息。
     返回 {anchor: {title, level, agent_summary}} 或 None（outline 文件不存在 / 路径越界）。"""
     raw_path = _safe_join_under_root(raw_path_rel)
     if raw_path is None or not raw_path.exists():
@@ -2237,7 +2448,7 @@ def list_i18n_violations(web_dir: Path | None = None) -> list[dict]:
 
 
 def list_unsummarized_sections(pages) -> list[dict]:
-    """扫 wiki 中 [[raw/...#^h-...]] 形式的章节级引用，列出对应 raw outline 里
+    """扫 wiki 中来源章节级引用，列出对应 derived/raw outline 里
     agent_summary 为 null 的章节（即被引用却没回填摘要）。
 
     去重：同一 (raw, anchor) 只列一次，但带上所有引用方供溯源。
@@ -2420,6 +2631,27 @@ def fmt_health(report):
     print(f"检查时间: {report['last_check']}")
 
 
+def fmt_obsidian_report(report):
+    if report["ok"]:
+        print("✅ 当前 workspace 可以作为 Obsidian Vault")
+    else:
+        print("❌ 当前 workspace 结构不完整，暂不建议作为 Obsidian Vault")
+        for name, exists in report["required_dirs"].items():
+            if not exists:
+                print(f"   - 缺少目录: {name}")
+        for rel, exists in report["required_files"].items():
+            if not exists:
+                print(f"   - 缺少文件: {rel}")
+    print(f"Vault 路径: {report['vault_path']}")
+    print(f"根索引: {report['root_index_path']}")
+    print(f"打开 URI: {report['root_index_uri']}")
+    git_root = report["git"].get("root")
+    print(f"Git 仓库: {git_root or '未检测到'}")
+    print(f"Wiki 页面: {report['wiki_pages']}")
+    for warning in report["warnings"]:
+        print(f"⚠️  {warning}")
+
+
 def fmt_validate(result, file_path):
     warnings = result.get("warnings") or []
     if result["valid"] and not warnings:
@@ -2474,6 +2706,16 @@ def fmt_source_issues(items: list[dict]):
                 print(f"    详情: {it['detail']}")
             print(f"    修复: {it['suggestion']}")
             print()
+
+
+def fmt_stale_ingests(items: list[dict]):
+    if not items:
+        print("✅ 已追踪的来源摘要均对应当前派生版本")
+        return
+    print(f"⚠️  发现 {len(items)} 个来源摘要需要重新 ingest 或补登记：\n")
+    for item in items:
+        print(f"  {item['path']}  →  {', '.join(item['reasons'])}")
+        print(f"     manifest: {item['manifest_path']}")
 
 
 def fmt_index_mismatches(items: list[dict]):
@@ -2668,6 +2910,46 @@ def fmt_graph(data: dict):
     print("\n  （JSON 详情请加 --json）")
 
 
+def fmt_project_list(items: list[dict]):
+    if not items:
+        print("（暂无项目）")
+        return
+    print(f"项目列表（{len(items)} 个）：\n")
+    for item in items:
+        valid = "✅" if item.get("valid") else "⚠️"
+        print(
+            f"  {valid} [{item.get('status') or 'invalid':10}] "
+            f"{item['project_id']}  · 决策 {item.get('decision_count', 0)}  "
+            f"→ {item['state_path']}"
+        )
+        if item.get("next_action"):
+            print(f"    下一行动: {item['next_action']}")
+        for error in item.get("errors", []):
+            print(f"    错误: {error}")
+
+
+def fmt_project_show(data: dict):
+    project = data["project"]
+    state = data["state"]
+    fm = state["frontmatter"]
+    print(f"项目: {project['project_id']}")
+    print(f"状态: {fm.get('status')}  更新时间: {fm.get('updated_at')}")
+    print(f"状态文件: {state['path']}")
+    if data.get("brief"):
+        print(f"Brief: {data['brief']['path']}")
+    print(f"决策记录: {len(data['decisions'])} 条\n")
+    print(state["content"] or "（状态正文为空）")
+    for decision in data["decisions"]:
+        print(f"\n--- {decision['title']} [{decision['decision_status']}] ---")
+        print(f"{decision['path']}\n{decision['content']}")
+
+
+def fmt_context_build(data: dict):
+    action = "已写入" if data.get("written") else "仅生成"
+    print(f"✅ Context Pack {action}: {data['context_path']}")
+    print(data["context"])
+
+
 def fmt_bare_claims(items: list[dict]):
     if not items:
         print("✅ 没有发现裸论断（含数字但无 [[raw/...]] 或 [需要来源] 支撑的段落）")
@@ -2715,8 +2997,10 @@ _WORKSPACE_SKELETON = (
     "wiki/entities",
     "wiki/analyses",
     "wiki/indexes",
+    "wiki/memory/candidates",
     "raw/articles",
     "raw/papers",
+    "derived",
     "exports",
     "my_thoughts",
 )
@@ -2741,8 +3025,37 @@ def create_workspace(name: str) -> dict:
     today = datetime.now().strftime("%Y-%m-%d")
     for sub_dir in _WORKSPACE_SKELETON:
         (ws / sub_dir).mkdir(parents=True)
-    for keep in ("exports", "my_thoughts", "raw/articles", "raw/papers"):
+    for keep in (
+        "exports", "my_thoughts", "raw/articles", "raw/papers", "derived",
+    ):
         (ws / keep / ".gitkeep").write_text("", encoding="utf-8")
+
+    memory_draft = f"""---
+title: \"用户个人工作记忆\"
+type: memory
+created_date: {today}
+last_modified: {today}
+last_modified_by: LLM
+status: draft
+confidence: medium
+source_count: 0
+sources: []
+tags: []
+---
+
+# 用户个人工作记忆
+
+## 记忆内容
+
+<!-- 只记录会影响 Agent 协作方式的偏好、目标、约束或已确认决策。 -->
+
+## 来源与适用范围
+
+- 来源：
+- 适用范围：
+- 最近确认时间：
+"""
+    (ws / "wiki" / "memory" / "confirmed.md").write_text(memory_draft, encoding="utf-8")
 
     root_index = f"""---
 title: "知识库根索引 — {name}"
@@ -2787,7 +3100,7 @@ page_count: 0
         "name": name,
         "path": str(ws),
         "dirs": list(_WORKSPACE_SKELETON),
-        "files": ["wiki/root_index.md", "log.md"],
+        "files": ["wiki/root_index.md", "wiki/memory/confirmed.md", "log.md"],
     }
 
 
@@ -2853,6 +3166,7 @@ def _main_impl():
     p_out.add_argument("path", help="源页面路径，相对项目根")
 
     sub.add_parser("health", help="综合健康度报告", parents=[common])
+    sub.add_parser("obsidian-check", help="检查当前 workspace 是否可作为 Obsidian Vault", parents=[common])
 
     p_val = sub.add_parser("validate-frontmatter", help="校验 frontmatter", parents=[common])
     p_val.add_argument("path", help="要校验的文件路径")
@@ -2881,12 +3195,14 @@ def _main_impl():
     p_ann.add_argument("anchor", help="目标 section 的 heading anchor")
     p_ann.add_argument("summary", help="摘要文本（一两句话）")
 
-    sub.add_parser("list-broken-refs", help="扫描 wiki/ 中失效的 [[raw/...#^anchor]] 引用", parents=[common])
+    sub.add_parser("list-broken-refs", help="扫描 wiki/ 中失效的 raw/derived 块级引用", parents=[common])
     sub.add_parser("list-unsummarized", help="扫描被 wiki 章节引用但 outline.json 中 agent_summary 为 null 的章节", parents=[common])
-    sub.add_parser("list-bare-claims", help="扫描含数字 / 百分比 / NLP 指标但无 [[raw/...]] 或 [需要来源] 支撑的段落", parents=[common])
-    sub.add_parser("list-coarse-citations", help="扫描含数字论断但只挂整页 [[raw/X]]、未到块级 [[raw/X#^anchor]] 的段落（引用粒度不足）", parents=[common])
+    sub.add_parser("list-bare-claims", help="扫描含数字 / 百分比 / NLP 指标但无来源引用或 [需要来源] 支撑的段落", parents=[common])
+    sub.add_parser("list-coarse-citations", help="扫描含数字论断但来源引用未精确到块级 anchor 的段落", parents=[common])
     sub.add_parser("list-index-mismatches", help="扫描 type=index 页：page_count 字段与 scope 实际匹配数不一致的", parents=[common])
     sub.add_parser("list-source-issues", help="扫描 source_count 与 sources 数组不一致 / 论断页缺 source 不标 #to-be-updated 等问题", parents=[common])
+    p_stale = sub.add_parser("list-stale-ingests", help="扫描来源摘要记录的派生哈希是否已过期", parents=[common])
+    p_stale.add_argument("--include-untracked", action="store_true", help="同时列出尚未登记派生哈希的旧来源摘要")
     sub.add_parser("list-status-issues", help="扫描 status=reviewed 但 last_modified_by≠Human 的矛盾页（LLM 写入页自称已审阅）", parents=[common])
     sub.add_parser("list-relation-issues", help="扫描 [[X|RELATION]] 中非标准关系类型词（拼写错误 / 未在白名单）", parents=[common])
     sub.add_parser("list-relation-balance", help="扫描关系词频次失衡：单一关系词占比 > 30%% 报警（防 LLM 偷懒用最弱关系词）", parents=[common])
@@ -2911,6 +3227,46 @@ def _main_impl():
         "--include-archive", action="store_true",
         help="包含 wiki/_archive_* 归档区（默认排除）",
     )
+
+    p_projects = sub.add_parser(
+        "project-list",
+        help="列出当前 workspace 的项目状态",
+        parents=[common],
+    )
+    p_projects.add_argument("--status", dest="project_status")
+
+    p_project = sub.add_parser(
+        "project-show",
+        help="显示一个项目的状态、brief 和决策记录",
+        parents=[common],
+    )
+    p_project.add_argument("project_id")
+    p_project.add_argument("--decision-status")
+    p_project.add_argument("--date-from")
+    p_project.add_argument("--date-to")
+
+    p_context = sub.add_parser(
+        "context-build",
+        help="生成一个项目的可迁移 Context Pack",
+        parents=[common],
+    )
+    p_context.add_argument("project_id")
+    p_context.add_argument("--max-chars", type=int, default=30000)
+    p_context.add_argument(
+        "--no-write", action="store_true",
+        help="只输出 Context Pack，不写入 projects/<id>/context.md",
+    )
+
+    p_confirm = sub.add_parser(
+        "project-confirm",
+        help="显式确认一个项目状态或决策记录",
+        parents=[common],
+    )
+    p_confirm.add_argument("project_id")
+    p_confirm.add_argument("target", choices=["state", "decision"])
+    p_confirm.add_argument("decision_id", nargs="?")
+    p_confirm.add_argument("--decision-status", choices=["reviewed", "executed"])
+    p_confirm.add_argument("--note", default="")
 
     args = parser.parse_args()
     # 合并：父级 --json 或子级 --json 任意为 True 即输出 JSON
@@ -2983,7 +3339,69 @@ def _main_impl():
         WIKI_DIR = PROJECT_ROOT / "wiki"
         RAW_DIR = PROJECT_ROOT / "raw"
 
-    pages = load_all_wiki_pages()
+    if args.cmd == "project-list":
+        items = list_project_states(PROJECT_ROOT / "projects", args.project_status)
+        if args.json:
+            output_json(items)
+        else:
+            fmt_project_list(items)
+        return
+
+    if args.cmd == "project-show":
+        try:
+            result = load_project(
+                PROJECT_ROOT / "projects",
+                args.project_id,
+                args.decision_status,
+                args.date_from,
+                args.date_to,
+            )
+        except ProjectDataError as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if args.json:
+            output_json(result)
+        else:
+            fmt_project_show(result)
+        return
+
+    if args.cmd == "context-build":
+        try:
+            result = build_and_write(
+                PROJECT_ROOT / "projects",
+                args.project_id,
+                args.max_chars,
+                write=not args.no_write,
+            )
+        except ProjectDataError as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if args.json:
+            output_json(result)
+        else:
+            fmt_context_build(result)
+        return
+
+    if args.cmd == "project-confirm":
+        try:
+            result = confirm_project_record(
+                PROJECT_ROOT / "projects",
+                args.project_id,
+                args.target,
+                args.decision_id,
+                args.decision_status,
+                args.note,
+            )
+        except ProjectDataError as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if args.json:
+            output_json(result)
+        else:
+            print(f"✅ 已确认 {result['target']}: {result['path']}")
+        return
+
+    pages = load_search_pages() if args.cmd == "search" else load_all_wiki_pages()
 
     if args.cmd == "search":
         results = search_pages(args.query, pages, args.limit)
@@ -3049,6 +3467,13 @@ def _main_impl():
             output_json(report)
         else:
             fmt_health(report)
+
+    elif args.cmd == "obsidian-check":
+        report = obsidian_integration_report(pages)
+        if args.json:
+            output_json(report)
+        else:
+            fmt_obsidian_report(report)
 
     elif args.cmd == "validate-frontmatter":
         # 与 outline / read-section / blocks 等命令统一走 resolve_doc_path——
@@ -3177,6 +3602,13 @@ def _main_impl():
             output_json(items)
         else:
             fmt_source_issues(items)
+
+    elif args.cmd == "list-stale-ingests":
+        items = list_stale_ingests(pages, include_untracked=args.include_untracked)
+        if args.json:
+            output_json(items)
+        else:
+            fmt_stale_ingests(items)
 
     elif args.cmd == "list-status-issues":
         items = list_status_issues(pages)
