@@ -125,6 +125,12 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from postprocess import process as postprocess_text
 from extract_embedded_media import extract_embedded_media
+from transcribe_audio import transcript_confidence_metrics
+from evidence_locator import (
+    build_docling_evidence,
+    build_pdf_evidence,
+    build_workbook_evidence,
+)
 
 SUPPORTED_EXTENSIONS = {
     # 已是 markdown：仅做 postprocess（加锚点 + 生成 outline）
@@ -152,6 +158,8 @@ OOXML_MEDIA_EXTENSIONS = {".docx", ".pptx"}
 
 PIPELINE_VERSION = 3
 AUDIO_PIPELINE_VERSION = 4
+EVIDENCE_PIPELINE_VERSION = 1
+EVIDENCE_EXTENSIONS = {".pdf", ".xlsx"}
 
 def _ocr_engine() -> str:
     """返回配置的 OCR 引擎；显式命令优先被标记为 custom-command。"""
@@ -346,7 +354,16 @@ def _target_paths(source: Path) -> tuple[Path, Path, Path]:
     source_root = _SOURCE_ROOT or source.parent
     derived_root = _DERIVED_ROOT or source.parent / "derived"
     rel = source.resolve().relative_to(source_root.resolve())
-    target_md = (derived_root / rel).with_suffix(".md")
+    if source.suffix.lower() == ".md" and any(
+        sibling.is_file()
+        and sibling.stem.casefold() == source.stem.casefold()
+        and sibling.suffix.lower() != ".md"
+        and sibling.suffix.lower() in SUPPORTED_EXTENSIONS
+        for sibling in source.parent.iterdir()
+    ):
+        target_md = derived_root / rel.with_name(f"{rel.stem}.raw.md")
+    else:
+        target_md = (derived_root / rel).with_suffix(".md")
     return target_md, target_md.with_suffix(".outline.json"), target_md.with_suffix(".source.json")
 
 
@@ -361,6 +378,10 @@ def _artifact_paths(target_md: Path) -> tuple[Path, Path, Path]:
 
 def _transcript_path(target_md: Path) -> Path:
     return target_md.with_suffix(".transcript.json")
+
+
+def _evidence_path(target_md: Path) -> Path:
+    return target_md.with_suffix(".evidence.json")
 
 
 def _file_sha256(path: Path) -> str:
@@ -402,6 +423,11 @@ def should_convert(source: Path, force: bool) -> bool:
             derived_hash = hashlib.file_digest(derived_file, "sha256").hexdigest()
         changed = (
             manifest.get("pipeline_version") != PIPELINE_VERSION
+            or (
+                source.suffix.lower() in EVIDENCE_EXTENSIONS
+                and manifest.get("evidence_pipeline_version")
+                != EVIDENCE_PIPELINE_VERSION
+            )
             or (
                 source.suffix.lower() in AUDIO_EXTENSIONS
                 and manifest.get("audio_pipeline_version") != AUDIO_PIPELINE_VERSION
@@ -462,7 +488,7 @@ def _project_relative_posix(path: Path) -> str:
     return str(rel).replace("\\", "/")
 
 
-def _docling_pdf_markdown(source: Path) -> tuple[bool, str, str]:
+def _docling_pdf_markdown(source: Path) -> tuple[bool, str, str, dict | None]:
     """用 Docling + OCR 处理没有文本层的 PDF；依赖按需导入。"""
     try:
         # Windows 非开发者模式下禁用 HF cache symlink，避免模型下载失败。
@@ -471,7 +497,7 @@ def _docling_pdf_markdown(source: Path) -> tuple[bool, str, str]:
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.base_models import InputFormat
     except ImportError as exc:
-        return False, "", f"Docling 未安装: {exc}"
+        return False, "", f"Docling 未安装: {exc}", None
 
     try:
         pipeline_options = PdfPipelineOptions(do_ocr=True)
@@ -483,11 +509,16 @@ def _docling_pdf_markdown(source: Path) -> tuple[bool, str, str]:
         result = converter.convert(str(source))
         markdown = result.document.export_to_markdown()
     except Exception as exc:  # noqa: BLE001 - 将可解释错误写入验收输出
-        return False, "", f"Docling + OCR 执行失败: {exc}"
+        return False, "", f"Docling + OCR 执行失败: {exc}", None
 
     if not markdown.strip():
-        return False, "", "Docling + OCR 输出为空"
-    return True, markdown, "docling+ocr"
+        return False, "", "Docling + OCR 输出为空", None
+    return (
+        True,
+        markdown,
+        "docling+ocr",
+        build_docling_evidence(result.document.export_to_dict()),
+    )
 
 
 def _transcribe_audio(source: Path) -> tuple[bool, dict | str]:
@@ -548,6 +579,18 @@ def _transcript_markdown(source: Path, transcript: dict) -> str:
 def _without_markdown_images(markdown: str) -> str:
     """Remove MarkItDown image placeholders before adding exported local assets."""
     return re.sub(r"!\[[^\]]*\]\([^)]*\)", "", markdown)
+
+
+def _without_markitdown_nan(markdown: str) -> str:
+    """MarkItDown uses NaN for blank spreadsheet cells; blanks are evidence too."""
+    lines = []
+    for line in markdown.splitlines():
+        if line.lstrip().startswith("|"):
+            cells = line.split("|")
+            cells = [" " if cell.strip().casefold() == "nan" else cell for cell in cells]
+            line = "|".join(cells)
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _locator_text(locator: dict) -> str:
@@ -694,6 +737,7 @@ def convert_file(md: MarkItDown, source: Path) -> tuple[bool, str]:
     converter_used = "markdown" if is_md else ""
     visual_data = None
     transcript_data = None
+    evidence_data = None
 
     if is_md:
         try:
@@ -758,15 +802,28 @@ def convert_file(md: MarkItDown, source: Path) -> tuple[bool, str]:
                 markitdown_error = str(exc)
             converter_used = "markitdown"
             if not markdown.strip() and suffix == ".pdf":
-                ok, docling_markdown, fallback_message = _docling_pdf_markdown(source)
+                ok, docling_markdown, fallback_message, docling_evidence = _docling_pdf_markdown(source)
                 if ok:
                     markdown = docling_markdown
                     converter_used = fallback_message
+                    evidence_data = docling_evidence
                 else:
                     detail = markitdown_error or "转换结果为空"
                     return False, f"{detail}；{fallback_message}"
             if not markdown.strip():
                 return False, "转换结果为空"
+
+            if suffix == ".xlsx":
+                try:
+                    workbook_appendix, evidence_data = build_workbook_evidence(source)
+                except Exception as exc:  # noqa: BLE001 - 结构化失败必须显式暴露
+                    return False, f"XLSX 公式/值提取失败: {exc}"
+                markdown = _without_markitdown_nan(markdown).rstrip() + "\n" + workbook_appendix
+            elif suffix == ".pdf" and evidence_data is None:
+                try:
+                    evidence_data = build_pdf_evidence(source, ocr_images)
+                except Exception as exc:  # noqa: BLE001 - page/bbox 失败不能静默成功
+                    return False, f"PDF page/bbox 提取失败: {exc}"
 
         if suffix in OOXML_MEDIA_EXTENSIONS:
             try:
@@ -918,6 +975,9 @@ def convert_file(md: MarkItDown, source: Path) -> tuple[bool, str]:
 
     audio_stats = None
     if transcript_data is not None:
+        transcript_data["confidence"] = transcript_data.get("confidence") or (
+            transcript_confidence_metrics(transcript_data.get("segments", []))
+        )
         transcript_data["source_id"] = source_id
         transcript_data["source_path"] = _project_relative_posix(source)
         for segment in transcript_data["segments"]:
@@ -953,6 +1013,7 @@ def convert_file(md: MarkItDown, source: Path) -> tuple[bool, str]:
             "text_normalization": transcript_data.get("text_normalization"),
             "text_normalization_version": transcript_data.get("text_normalization_version"),
             "quality_reviews_applied": len(transcript_data.get("quality_reviews_applied", [])),
+            "confidence": transcript_data.get("confidence"),
         }
         if transcript_data["status"] == "no_speech":
             quality_issues.append("VAD 未检测到语音")
@@ -962,6 +1023,34 @@ def convert_file(md: MarkItDown, source: Path) -> tuple[bool, str]:
                 quality_issues.append(message)
         if transcript_data["status"] in {"degraded", "failed"} and not transcript_data.get("issues"):
             quality_issues.append(f"音频转写状态为 {transcript_data['status']}，需人工复核")
+
+    evidence_stats = None
+    if evidence_data is not None:
+        evidence_data["source_id"] = source_id
+        evidence_data["source_path"] = _project_relative_posix(source)
+        target_evidence = _evidence_path(target_md)
+        _atomic_write_text(
+            target_evidence,
+            json.dumps(evidence_data, ensure_ascii=False, indent=2),
+        )
+        artifacts.append(
+            {
+                "type": "evidence",
+                "path": _project_relative_posix(target_evidence),
+                "sha256": _file_sha256(target_evidence),
+                "status": evidence_data["status"],
+            }
+        )
+        evidence_stats = {
+            "modality": evidence_data["modality"],
+            "status": evidence_data["status"],
+            "item_count": len(evidence_data.get("items", [])),
+            "page_count": evidence_data.get("page_count"),
+            "sheet_count": len(evidence_data.get("sheets", [])),
+        }
+        quality_issues.extend(
+            issue for issue in evidence_data.get("issues", []) if issue not in quality_issues
+        )
 
     quality = {
         "schema_version": 1,
@@ -974,6 +1063,7 @@ def convert_file(md: MarkItDown, source: Path) -> tuple[bool, str]:
         "paragraph_count": outline_data["doc_paragraphs"],
         "embedded_media": media_stats,
         "audio": audio_stats,
+        "evidence": evidence_stats,
         "issues": quality_issues,
     }
     _atomic_write_text(
@@ -993,6 +1083,9 @@ def convert_file(md: MarkItDown, source: Path) -> tuple[bool, str]:
         "pipeline_version": PIPELINE_VERSION,
         "audio_pipeline_version": (
             AUDIO_PIPELINE_VERSION if suffix in AUDIO_EXTENSIONS else None
+        ),
+        "evidence_pipeline_version": (
+            EVIDENCE_PIPELINE_VERSION if suffix in EVIDENCE_EXTENSIONS else None
         ),
         "audio_review_sha256": (
             _audio_review_sha256(source) if suffix in AUDIO_EXTENSIONS else None

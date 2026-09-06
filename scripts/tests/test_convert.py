@@ -6,6 +6,7 @@ import zipfile
 from types import SimpleNamespace
 
 import pytest
+from openpyxl import Workbook
 
 pytest.importorskip("markitdown")
 
@@ -208,6 +209,58 @@ def test_target_paths_preserve_subdirectories_below_raw(tmp_path, monkeypatch):
     assert markdown == tmp_path / "derived" / "papers" / "paper.md"
     assert outline == tmp_path / "derived" / "papers" / "paper.outline.json"
     assert manifest == tmp_path / "derived" / "papers" / "paper.source.json"
+
+
+def test_markdown_and_binary_twins_never_share_a_manifest(tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    markdown = raw / "paper.md"
+    pdf = raw / "paper.pdf"
+    markdown.write_text("source mirror", encoding="utf-8")
+    pdf.write_bytes(b"pdf")
+    monkeypatch.setattr(converter, "_SOURCE_ROOT", raw)
+    monkeypatch.setattr(converter, "_DERIVED_ROOT", tmp_path / "derived")
+
+    markdown_paths = converter._target_paths(markdown)
+    pdf_paths = converter._target_paths(pdf)
+
+    assert markdown_paths[0] == tmp_path / "derived" / "paper.raw.md"
+    assert markdown_paths[2] == tmp_path / "derived" / "paper.raw.source.json"
+    assert pdf_paths[0] == tmp_path / "derived" / "paper.md"
+    assert pdf_paths[2] == tmp_path / "derived" / "paper.source.json"
+    assert set(markdown_paths).isdisjoint(pdf_paths)
+
+
+def test_xlsx_writes_formula_value_evidence_and_removes_nan(tmp_path):
+    source = tmp_path / "orders.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Orders"
+    sheet.append(["id", "amount", "total"])
+    sheet.append(["ORD-004", None, "=B2*2"])
+    book.save(source)
+
+    ok, _ = converter.convert_file(
+        StaticConverter(
+            "## Orders\n| id | amount | total |\n| --- | --- | --- |\n"
+            "| ORD-004 | NaN | NaN |\n"
+        ),
+        source,
+    )
+
+    assert ok is True
+    markdown = (tmp_path / "derived" / "orders.md").read_text(encoding="utf-8")
+    assert "NaN" not in markdown
+    assert "=B2*2" in markdown
+    evidence = json.loads(
+        (tmp_path / "derived" / "orders.evidence.json").read_text(encoding="utf-8")
+    )
+    assert evidence["sheets"][0]["rows"][1]["values"][1] is None
+    assert evidence["sheets"][0]["formula_cells"][0]["formula"] == "=B2*2"
+    manifest = json.loads(
+        (tmp_path / "derived" / "orders.source.json").read_text(encoding="utf-8")
+    )
+    assert any(artifact["type"] == "evidence" for artifact in manifest["artifacts"])
 
 
 def test_docx_exports_media_and_records_paragraph_locator(tmp_path, monkeypatch):

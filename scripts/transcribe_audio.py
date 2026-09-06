@@ -158,6 +158,68 @@ def repeated_segment_runs(segments: list[dict], minimum_run: int = 5) -> list[di
     return runs
 
 
+def transcript_confidence_metrics(segments: list[dict]) -> dict:
+    """Summarize model confidence and apply a conservative review gate."""
+    logprobs = [
+        float(item["avg_logprob"])
+        for item in segments
+        if isinstance(item.get("avg_logprob"), (int, float))
+    ]
+    no_speech = [
+        float(item["no_speech_prob"])
+        for item in segments
+        if isinstance(item.get("no_speech_prob"), (int, float))
+    ]
+    word_probs = [
+        float(word["probability"])
+        for item in segments
+        for word in (item.get("words") or [])
+        if isinstance(word.get("probability"), (int, float))
+    ]
+
+    def average(values):
+        return sum(values) / len(values) if values else None
+
+    def fraction(values, predicate):
+        return sum(predicate(value) for value in values) / len(values) if values else None
+
+    metrics = {
+        "segment_count": len(segments),
+        "average_log_probability": average(logprobs),
+        "low_log_probability_fraction": fraction(logprobs, lambda value: value < -1.0),
+        "average_no_speech_probability": average(no_speech),
+        "high_no_speech_fraction": fraction(no_speech, lambda value: value > 0.8),
+        "word_count": len(word_probs),
+        "average_word_probability": average(word_probs),
+        "low_word_probability_fraction": fraction(word_probs, lambda value: value < 0.5),
+    }
+    observed = bool(logprobs or no_speech or word_probs)
+    checks = [
+        (
+            metrics["average_log_probability"] is None
+            or metrics["average_log_probability"] >= -1.0
+        ),
+        (
+            metrics["low_log_probability_fraction"] is None
+            or metrics["low_log_probability_fraction"] <= 0.10
+        ),
+        (
+            metrics["high_no_speech_fraction"] is None
+            or metrics["high_no_speech_fraction"] <= 0.25
+        ),
+        (
+            metrics["average_word_probability"] is None
+            or metrics["average_word_probability"] >= 0.50
+        ),
+        (
+            metrics["low_word_probability_fraction"] is None
+            or metrics["low_word_probability_fraction"] <= 0.50
+        ),
+    ]
+    metrics["gate_passed"] = None if not observed else all(checks)
+    return metrics
+
+
 def replace_segments_in_range(
     segments: list[dict], start: float, end: float, replacements: list[dict]
 ) -> list[dict]:
@@ -274,6 +336,16 @@ def assess_transcript(
                 "code": "repeated_text_review",
                 "message": f"检测到连续重复转写“{run['text']}”共 {run['count']} 次，需听录复核",
                 **run,
+            }
+        )
+
+    confidence = transcript_confidence_metrics(segments)
+    if confidence["gate_passed"] is False:
+        issues.append(
+            {
+                "code": "low_transcript_confidence",
+                "message": "音频转写置信度闸门未通过，需抽样听录复核",
+                "confidence": confidence,
             }
         )
 
@@ -482,6 +554,7 @@ def main() -> int:
         "processed_duration": processed_duration,
         "processing_coverage": coverage,
         "last_segment_end": max((item["end"] for item in segments), default=None),
+        "confidence": transcript_confidence_metrics(segments),
         "issues": issues,
         "text": text,
         "segments": segments,

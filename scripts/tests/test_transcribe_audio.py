@@ -9,6 +9,7 @@ from scripts.transcribe_audio import (
     refresh_chunk_counts,
     replace_segments_in_range,
     normalize_segment_text,
+    transcript_confidence_metrics,
 )
 
 
@@ -78,6 +79,39 @@ def test_quality_gate_accepts_human_confirmed_repetition():
 
     assert status == "success"
     assert issues == []
+
+
+def test_confidence_metrics_accept_reasonable_transcript():
+    segments = [
+        {
+            **_segment(0, 0.0, 1.0, "正常内容"),
+            "avg_logprob": -0.4,
+            "no_speech_prob": 0.1,
+            "words": [{"probability": 0.8}],
+        }
+    ]
+
+    metrics = transcript_confidence_metrics(segments)
+
+    assert metrics["gate_passed"] is True
+    assert metrics["average_word_probability"] == pytest.approx(0.8)
+
+
+def test_quality_gate_rejects_low_confidence_transcript():
+    chunks = [{"id": 0, "start": 0.0, "end": 10.0, "status": "success"}]
+    segments = [
+        {
+            **_segment(0, 0.0, 1.0, "可疑内容"),
+            "avg_logprob": -1.5,
+            "no_speech_prob": 0.9,
+            "words": [{"probability": 0.2}],
+        }
+    ]
+
+    status, _, _, issues = assess_transcript(10.0, chunks, segments)
+
+    assert status == "degraded"
+    assert [issue["code"] for issue in issues] == ["low_transcript_confidence"]
 
 
 def test_simplified_chinese_normalization_updates_segments_and_words():

@@ -298,6 +298,8 @@ def load_search_pages():
     for md_file in derived_dir.rglob("*.md"):
         if md_file.name.startswith("."):
             continue
+        if md_file.name.endswith(".raw.md"):
+            continue
         page = Page.from_file(md_file)
         if page:
             pages.append(page)
@@ -414,6 +416,7 @@ GENERATED_EMBEDDED_OCR_RE = re.compile(
     r"<!-- groundmap:embedded-ocr:end -->",
     re.DOTALL,
 )
+SEARCH_SYNONYMS = {"宣传册": ("brochure",)}
 
 
 def _search_terms(query):
@@ -428,6 +431,9 @@ def _search_terms(query):
             terms.extend(token[i:i + 2] for i in range(len(token) - 1))
         else:
             terms.append(token)
+    for phrase, synonyms in SEARCH_SYNONYMS.items():
+        if phrase in query_lower:
+            terms.extend(synonyms)
     return list(dict.fromkeys(terms))
 
 
@@ -438,25 +444,47 @@ def search_pages(query, pages, limit=20):
         return []
     uses_cjk = bool(SEARCH_CJK_RE.search(query))
 
-    results = []
+    prepared_pages = []
     for page in pages:
-        title_lower = page.title.lower()
         search_content = GENERATED_MEDIA_RE.sub("", page.raw_content)
         search_content = GENERATED_EMBEDDED_OCR_RE.sub("", search_content)
-        content_lower = search_content.lower()
+        prepared_pages.append(
+            (page, page.title.lower(), search_content, search_content.lower())
+        )
+
+    term_weights = {term: 1 for term in terms}
+    if uses_cjk and prepared_pages:
+        rare_cutoff = max(2, len(prepared_pages) // 10)
+        very_rare_cutoff = max(1, len(prepared_pages) // 50)
+        for term in terms:
+            frequency = sum(
+                term in title_lower or term in content_lower
+                for _page, title_lower, _content, content_lower in prepared_pages
+            )
+            term_weights[term] += int(frequency <= rare_cutoff)
+            term_weights[term] += int(frequency <= very_rare_cutoff)
+
+    results = []
+    compact_query = re.sub(r"\s+", "", query.casefold())
+    for page, title_lower, search_content, content_lower in prepared_pages:
         body_weight = 2 if uses_cjk and page.path.startswith("derived/") else 1
 
         score = 0
         for term in terms:
+            term_weight = term_weights[term]
             if uses_cjk:
                 # 中文二元片段在长文中容易重复；每个词项每个字段只计一次，
-                # 让排序反映覆盖了多少查询概念，而不是文档有多长。
-                score += 5 if term in title_lower else 0
-                score += body_weight if term in content_lower else 0
+                # 并给低文档频率的词项更高权重，避免高频泛词长文挤占结果。
+                score += 5 * term_weight if term in title_lower else 0
+                score += body_weight * term_weight if term in content_lower else 0
             else:
                 # 非中文查询保留原有计分行为，避免改变既有英文搜索语义。
                 score += title_lower.count(term) * 5
                 score += content_lower.count(term)
+
+        compact_title = re.sub(r"\s+", "", page.title.casefold())
+        if len(compact_title) >= 3 and compact_title in compact_query:
+            score += 20
 
         if score > 0:
             snippet = ""
@@ -482,7 +510,149 @@ def search_pages(query, pages, limit=20):
             })
 
     results.sort(key=lambda x: -x["score"])
-    return results[:limit]
+
+    # A source summary is a navigation record for its cited primary evidence.
+    # If the summary is highly relevant, keep that cited derived file in the
+    # candidate set even when OCR/layout differences make its literal score
+    # weak.  This is a deterministic citation bridge, not semantic expansion.
+    pages_by_path = {page.path: page for page in pages}
+    results_by_path = {item["path"]: item for item in results}
+    for summary_result in results[:max(limit * 2, 10)]:
+        summary_page = pages_by_path.get(summary_result["path"])
+        if summary_page is None or summary_page.type != "source_summary":
+            continue
+        for link in parse_wikilinks(summary_page.raw_content):
+            target = normalize_link_target(link.target)
+            if not target.startswith("raw/"):
+                continue
+            derived_path = "derived/" + target.removeprefix("raw/")
+            derived_page = pages_by_path.get(derived_path)
+            if derived_page is None:
+                continue
+            bridged_score = summary_result["score"] + 3
+            candidate = results_by_path.get(derived_path)
+            if candidate is None:
+                candidate = {
+                    "path": derived_page.path,
+                    "title": derived_page.title,
+                    "type": derived_page.type,
+                    "status": derived_page.status,
+                    "score": bridged_score,
+                    "snippet": "",
+                }
+                results.append(candidate)
+                results_by_path[derived_path] = candidate
+            else:
+                candidate["score"] = max(candidate["score"], bridged_score)
+
+    results.sort(key=lambda x: -x["score"])
+    top = results[:limit]
+    if limit >= 2:
+        wanted = min(2, sum(item["path"].startswith("derived/") for item in results))
+        have = sum(item["path"].startswith("derived/") for item in top)
+        for candidate in results[limit:]:
+            if have >= wanted:
+                break
+            if not candidate["path"].startswith("derived/"):
+                continue
+            replace_at = next(
+                (
+                    index
+                    for index in range(len(top) - 1, -1, -1)
+                    if not top[index]["path"].startswith("derived/")
+                ),
+                None,
+            )
+            if replace_at is None:
+                break
+            top[replace_at] = candidate
+            have += 1
+        top.sort(key=lambda item: -item["score"])
+    for result in top:
+        locator = _best_evidence_locator(result["path"], terms)
+        if locator is not None:
+            result["locator"] = locator
+    return top
+
+
+def _best_evidence_locator(page_path: str, terms: list[str]) -> dict | None:
+    """Return the best source/derived coordinate without changing retrieval ranking."""
+    md_path = PROJECT_ROOT / page_path
+    candidates = []
+    evidence_path = md_path.with_suffix(".evidence.json")
+    if evidence_path.is_file():
+        try:
+            payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+            candidates.extend(payload.get("items", []))
+        except (OSError, ValueError, TypeError):
+            pass
+
+    # DOCX/PPTX text already has deterministic block anchors in the generated
+    # Markdown.  Expose them as evidence coordinates, and carry the current
+    # slide number for PPTX content.  Structured source sidecars are added
+    # first, so they win exact-score ties over these Markdown fallbacks.
+    source_suffix = ""
+    manifest_path = md_path.with_suffix(".source.json")
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            source_suffix = Path(str(manifest.get("source_path", ""))).suffix.lower()
+        except (OSError, ValueError, TypeError):
+            pass
+    if source_suffix in {".docx", ".pptx"} and md_path.is_file():
+        current_slide = None
+        try:
+            for block in parse_blocks_with_anchors(md_path):
+                slide_match = re.search(r"<!--\s*Slide number:\s*(\d+)\s*-->", block.text)
+                if slide_match:
+                    current_slide = int(slide_match.group(1))
+                if not block.anchor:
+                    continue
+                locator = {"kind": source_suffix.lstrip("."), "anchor": block.anchor}
+                if source_suffix == ".pptx" and current_slide is not None:
+                    locator["slide"] = current_slide
+                candidates.append({"text": block.text, "locator": locator})
+        except OSError:
+            pass
+
+    transcript_path = md_path.with_suffix(".transcript.json")
+    if transcript_path.is_file():
+        try:
+            payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+            candidates.extend(
+                {"text": item.get("text", ""), "locator": item.get("locator")}
+                for item in payload.get("segments", [])
+            )
+        except (OSError, ValueError, TypeError):
+            pass
+
+    visual_path = md_path.with_suffix(".visual.json")
+    if visual_path.is_file():
+        try:
+            payload = json.loads(visual_path.read_text(encoding="utf-8"))
+            for asset in payload.get("assets", []):
+                base = (asset.get("locators") or [{"kind": "image"}])[0]
+                for block in (asset.get("ocr") or {}).get("blocks", []):
+                    locator = dict(base)
+                    if block.get("bbox") is not None:
+                        locator["bbox"] = block["bbox"]
+                    candidates.append({"text": block.get("text", ""), "locator": locator})
+        except (OSError, ValueError, TypeError):
+            pass
+
+    best = None
+    best_score = 0
+    for candidate in candidates:
+        text = str(candidate.get("text", "")).casefold()
+        score = sum(
+            (5 if any(char.isdigit() for char in term) else 1)
+            for term in terms
+            if term in text
+        )
+        if score > best_score and isinstance(candidate.get("locator"), dict):
+            best = candidate["locator"]
+            best_score = score
+    return best
 
 
 # ============================================================

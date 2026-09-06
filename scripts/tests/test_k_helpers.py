@@ -7,6 +7,7 @@ _split_scope_top_level / _glob_scope_to_paths / validate_frontmatter。
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,9 @@ class TestSearch:
         derived = fake_kb / "derived" / "papers" / "source.md"
         derived.parent.mkdir(parents=True)
         derived.write_text("# Source\n\nderived body\n", encoding="utf-8")
+        (derived.parent / "source.raw.md").write_text(
+            "# Raw mirror\n\nduplicate body\n", encoding="utf-8"
+        )
 
         assert {page.path for page in k.load_all_wiki_pages()} == {
             "wiki/concepts/known.md"
@@ -59,8 +63,115 @@ class TestSearch:
             "path", "title", "type", "status", "score", "snippet"
         }
 
+    def test_exact_short_title_in_query_beats_generic_long_documents(self):
+        image3 = k.Page(
+            "derived/image3.md", "图片3", "unknown", "draft", "medium", "", "unknown",
+            [], [], 0, "无机氮 实测 反演 磷酸盐",
+        )
+        decoy = k.Page(
+            "derived/decoy.md", "长文档", "unknown", "draft", "medium", "", "unknown",
+            [], [], 0, "两张专业图分别展示了四个面板和三栏",
+        )
+
+        results = k.search_pages("图片 3 的四个面板展示什么？", [decoy, image3])
+
+        assert results[0]["path"] == "derived/image3.md"
+
+    def test_top_five_keeps_two_primary_derived_sources(self):
+        pages = [
+            k.Page(
+                f"wiki/{index}.md", f"Wiki {index}", "concept", "draft", "medium", "", "LLM",
+                [], [], 0, "地面站机构协议签署",
+            )
+            for index in range(5)
+        ] + [
+            k.Page(
+                f"derived/{index}.md", f"Source {index}", "unknown", "draft", "medium", "", "unknown",
+                [], [], 0, "地面站机构协议签署",
+            )
+            for index in range(2)
+        ]
+
+        results = k.search_pages("地面站机构协议签署", pages, limit=5)
+
+        assert sum(item["path"].startswith("derived/") for item in results) == 2
+
+    def test_relevant_source_summary_bridges_to_its_primary_evidence(self, fake_kb):
+        write_md(
+            fake_kb / "wiki" / "sources" / "paper.md",
+            standard_fm(title="Paper", type="source_summary"),
+            "ULSM 使用 K-means。[[raw/papers/a.md#^p-1-a1b2c3]]",
+        )
+        primary = fake_kb / "derived" / "papers" / "a.md"
+        primary.parent.mkdir(parents=True)
+        primary.write_text("OCR spelling differs here.\n", encoding="utf-8")
+
+        results = k.search_pages("ULSM K-means", k.load_search_pages(), limit=5)
+
+        assert any(item["path"] == "derived/papers/a.md" for item in results)
+
+    def test_search_attaches_workbook_range_locator(self, fake_kb):
+        target = fake_kb / "derived" / "orders.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("# Orders\n\nORD-004 净额公式 =J9-K9+I9\n", encoding="utf-8")
+        target.with_suffix(".evidence.json").write_text(
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "text": "ORD-004 净额 formula =J9-K9+I9",
+                            "locator": {"kind": "xlsx", "sheet": "订单明细", "range": "A9:N9"},
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        result = k.search_pages("ORD-004 净额公式", k.load_search_pages())[0]
+
+        assert result["locator"] == {
+            "kind": "xlsx", "sheet": "订单明细", "range": "A9:N9"
+        }
+
+    @pytest.mark.parametrize(
+        ("suffix", "body", "expected"),
+        [
+            (
+                ".docx",
+                "项目在吉大港大学建设。 ^p-2-a1b2c3\n",
+                {"kind": "docx", "anchor": "p-2-a1b2c3"},
+            ),
+            (
+                ".pptx",
+                "<!-- Slide number: 7 --> ^p-1-a1b2c3\n\n"
+                "四个面板展示实测值与反演值。 ^p-2-d4e5f6\n",
+                {"kind": "pptx", "anchor": "p-2-d4e5f6", "slide": 7},
+            ),
+        ],
+    )
+    def test_search_attaches_document_block_locator(
+        self, fake_kb, suffix, body, expected
+    ):
+        target = fake_kb / "derived" / "document.md"
+        target.parent.mkdir(parents=True)
+        target.write_text(body, encoding="utf-8")
+        target.with_suffix(".source.json").write_text(
+            json.dumps({"source_path": f"raw/document{suffix}"}),
+            encoding="utf-8",
+        )
+
+        query = "吉大港大学" if suffix == ".docx" else "四个面板 实测值 反演值"
+        result = k.search_pages(query, k.load_search_pages())[0]
+
+        assert result["locator"] == expected
+
     def test_ascii_query_keeps_space_split_behavior(self):
         assert k._search_terms("alpha beta") == ["alpha", "beta"]
+
+    def test_chinese_source_kind_adds_filename_synonym(self):
+        assert "brochure" in k._search_terms("宣传册中的天线配置")
 
     def test_chinese_search_gives_derived_body_evidence_double_weight(self):
         wiki = k.Page(
