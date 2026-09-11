@@ -1,0 +1,5 @@
+# Copy this file to .sensitive-markers.local before packaging.
+# Add one private repository name, project name, person name, or machine path per line.
+PRIVATE_DATA_REPOSITORY_NAME
+PRIVATE_PROJECT_NAME
+LOCAL_USER_PROFILE_PATH

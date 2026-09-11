@@ -213,6 +213,47 @@ export async function readFile(relPath: string): Promise<string> {
   return raw.replace(/\r\n/g, "\n");
 }
 
+/** Read a byte range from a validated workspace file (inclusive offsets). */
+export async function readFileBytes(
+  relPath: string,
+  start?: number,
+  end?: number,
+): Promise<{ bytes: Uint8Array; size: number }> {
+  const abs = safeResolve(relPath);
+  assertNotSymlinkEscape(abs);
+  const handle = await fsp.open(abs, "r");
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error(`不是文件：${relPath}`);
+    if (stat.size === 0 && start === undefined && end === undefined) {
+      return { bytes: new Uint8Array(), size: 0 };
+    }
+    const first = start ?? 0;
+    const last = end ?? stat.size - 1;
+    if (first < 0 || last < first || last >= stat.size) {
+      throw new Error(`字节范围不合法：${first}-${last}/${stat.size}`);
+    }
+    const bytes = new Uint8Array(last - first + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, first + offset);
+      if (bytesRead === 0) throw new Error(`读取未完成：${relPath}`);
+      offset += bytesRead;
+    }
+    return { bytes, size: stat.size };
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function fileSize(relPath: string): Promise<number> {
+  const abs = safeResolve(relPath);
+  assertNotSymlinkEscape(abs);
+  const stat = await fsp.stat(abs);
+  if (!stat.isFile()) throw new Error(`不是文件：${relPath}`);
+  return stat.size;
+}
+
 /** 写单个文件（UTF-8）。调用者负责权限校验。 */
 export async function writeFile(relPath: string, content: string): Promise<void> {
   const abs = safeResolve(relPath);

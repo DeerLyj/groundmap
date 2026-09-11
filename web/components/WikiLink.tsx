@@ -7,6 +7,7 @@ import { useT } from "@/lib/i18n-client";
 import { usePopoverState } from "@/lib/popover-context";
 import { MiniMarkdown } from "@/components/MiniMarkdown";
 import { AnchorRegistryContext } from "@/lib/anchor-refs";
+import { evidenceHref } from "@/lib/evidence-path";
 
 interface WikiLinkProps {
   target: string;
@@ -76,15 +77,17 @@ export function WikiLink({ target, anchor, relation, children }: WikiLinkProps) 
   const registry = useContext(AnchorRegistryContext);
   const normalized = normalizeLinkTarget(target);
   const isRaw = normalized.startsWith("raw/");
+  const isEvidence = isRaw || normalized.startsWith("derived/");
 
   // 锚点形如 "^h-2-3-abc" 或 "section-text"。convert.py 生成的锚点带 ^ 前缀；
   // 浏览器 fragment 直接用 ID（不带 ^）才能命中 PageRenderer 写入的 <h2 id="h-2-3-abc">
   const cleanAnchor = anchor ? anchor.replace(/^\^/, "") : null;
-  const href =
-    `/page/${normalized}` + (cleanAnchor ? `#${encodeURIComponent(cleanAnchor)}` : "");
+  const href = isEvidence
+    ? evidenceHref(normalized, cleanAnchor)
+    : `/page/${normalized}` + (cleanAnchor ? `#${encodeURIComponent(cleanAnchor)}` : "");
 
   // 论文样式：raw 引用如果在 registry 里有编号 → [n] 上标替代原文字（带 hover 预览）
-  if (isRaw) {
+  if (isEvidence) {
     const refKey = `raw:${normalized.replace(/\.md$/, "")}#${cleanAnchor || ""}`;
     const refNum = registry.get(refKey);
     if (refNum != null) {
@@ -108,7 +111,7 @@ export function WikiLink({ target, anchor, relation, children }: WikiLinkProps) 
   const display: ReactNode =
     !children || isDefaultText ? friendlyLabel(normalized) : children;
 
-  if (isRaw) {
+  if (isEvidence) {
     return (
       <>
         <RawLinkWithPreview href={href} target={normalized} anchor={cleanAnchor}>

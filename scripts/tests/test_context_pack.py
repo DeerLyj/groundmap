@@ -7,7 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from context_pack import (
+    ProjectDataError,
+    build_and_write,
     build_context_pack,
     confirm_project_record,
     list_projects,
@@ -42,6 +46,7 @@ def make_project(root: Path) -> Path:
             "blocked_by": [],
             "decision_refs": ["[[projects/demo-project/decisions/DEC-001]]"],
             "knowledge_refs": ["[[wiki/concepts/example]]"],
+            "last_modified_by": "Human",
         },
         "## 当前进展\n\n已完成基础实现。\n\n## 风险\n\n真实样本尚未验证。",
     )
@@ -53,6 +58,7 @@ def make_project(root: Path) -> Path:
             "decision_id": "DEC-001",
             "decision_status": "reviewed",
             "decision_date": "2026-09-01",
+            "last_modified_by": "Human",
         },
         "## 当前判断\n\n先完成状态、决策和交接。\n\n## 关键假设\n\n现有文件契约足够支撑第一版。",
     )
@@ -64,8 +70,22 @@ def make_project(root: Path) -> Path:
             "decision_id": "DEC-002",
             "decision_status": "pending_validation",
             "decision_date": "2026-09-02",
+            "last_modified_by": "Human",
         },
         "## 行动\n\n准备真实样本。",
+    )
+    write_project_file(
+        project / "progress" / "EXEC-001.md",
+        {
+            "title": "完成交接测试",
+            "project_id": "demo-project",
+            "execution_id": "EXEC-001",
+            "recorded_at": "2026-09-02",
+            "last_modified_by": "Human",
+        },
+        "## 行动\n\n执行真实项目交接。\n\n"
+        "## 结果\n\n发现 Context Pack 缺少执行反馈。\n\n"
+        "## 修正\n\n把行动、结果和修正纳入项目上下文。",
     )
     return root / "projects"
 
@@ -76,11 +96,19 @@ def test_list_and_show_project_records(tmp_path):
     assert len(items) == 1
     assert items[0]["valid"] is True
     assert items[0]["decision_count"] == 2
+    assert items[0]["execution_count"] == 1
+    assert items[0]["control_loop"]["complete"] is False
+    assert items[0]["control_loop"]["missing"] == [
+        "two_confirmed_decisions",
+        "context_pack_exists",
+    ]
 
     project = load_project(projects_root, "demo-project", decision_status="reviewed")
     assert project["state"]["frontmatter"]["next_action"] == "完成一次交接测试"
     assert [d["decision_id"] for d in project["decisions"]] == ["DEC-001"]
     assert project["decisions"][0]["sections"]["关键假设"].startswith("现有文件")
+    assert project["executions"][0]["sections"]["结果"].startswith("发现")
+    assert project["control_loop"]["confirmed_decision_count"] == 1
 
 
 def test_context_is_project_scoped_and_deterministic(tmp_path):
@@ -92,9 +120,46 @@ def test_context_is_project_scoped_and_deterministic(tmp_path):
     assert "Demo project" in first
     assert "完成一次交接测试" in first
     assert "采用最小闭环" in first
+    assert "发现 Context Pack 缺少执行反馈" in first
+    assert "context_pack_exists" in first
     assert "memory" not in first
     assert "wiki/concepts/example" in first
     assert first.count("wiki/concepts/example") == 1
+
+
+def test_written_context_completes_the_control_loop(tmp_path):
+    projects_root = make_project(tmp_path)
+    # The second decision becomes a confirmed critical decision once executed.
+    confirm_project_record(
+        projects_root,
+        "demo-project",
+        "decision",
+        "DEC-002",
+        "executed",
+    )
+    result = build_and_write(projects_root, "demo-project")
+
+    assert result["written"] is True
+    assert "P2 闭环：完成" in result["context"]
+    assert list_projects(projects_root)[0]["control_loop"]["complete"] is True
+
+
+def test_incomplete_execution_record_is_rejected(tmp_path):
+    projects_root = make_project(tmp_path)
+    progress_path = projects_root / "demo-project" / "progress" / "EXEC-001.md"
+    write_project_file(
+        progress_path,
+        {
+            "project_id": "demo-project",
+            "execution_id": "EXEC-001",
+            "recorded_at": "2026-09-02",
+            "last_modified_by": "Human",
+        },
+        "## 行动\n\n只记录了行动。",
+    )
+
+    with pytest.raises(ProjectDataError, match="result.*revision"):
+        load_project(projects_root, "demo-project")
 
 
 def test_context_respects_budget(tmp_path):
@@ -161,5 +226,15 @@ def test_explicit_confirmation_updates_only_selected_frontmatter(tmp_path):
     )
     assert decision["frontmatter"]["last_modified_by"] == "Human"
     assert decision["frontmatter"]["decision_status"] == "reviewed"
+    execution_result = confirm_project_record(
+        projects_root,
+        "demo-project",
+        "execution",
+        execution_id="EXEC-001",
+    )
+    assert execution_result["confirmed_by"] == "Human"
+    execution = load_project(projects_root, "demo-project")["executions"][0]
+    assert execution["frontmatter"]["last_modified_by"] == "Human"
+    assert "发现 Context Pack 缺少执行反馈" in execution["content"]
     context = build_context_pack(load_project(projects_root, "demo-project"))
     assert "等待样本验收" in context.split("## 决策记录", 1)[1].split("## 证据与知识入口", 1)[0]

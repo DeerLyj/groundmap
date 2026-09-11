@@ -97,6 +97,31 @@ def test_image_uses_external_ocr_command(tmp_path, monkeypatch):
     assert source.read_bytes() == b"not-a-real-image"
 
 
+def test_main_writes_conversion_run_report(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspaces" / "main"
+    raw = workspace / "raw"
+    raw.mkdir(parents=True)
+    (raw / "note.md").write_text("# Note\n\nMeasured content.\n", encoding="utf-8")
+    report = workspace / "projects" / "acceptance" / "convert-run.json"
+    monkeypatch.setenv("KB_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["convert.py", "--workspace", "main", "--report", str(report)],
+    )
+
+    converter.main()
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["kind"] == "conversion"
+    assert payload["totals"]["attempted"] == 1
+    assert payload["totals"]["converted"] == 1
+    assert payload["totals"]["quality_success"] == 1
+    assert payload["files"][0]["path"] == "note.md"
+    assert payload["files"][0]["duration_ms"] >= 0
+    assert payload["cloud_llm_calls"] == 0
+
+
 def test_image_without_ocr_backend_fails_explicitly(tmp_path, monkeypatch):
     source = tmp_path / "figure.png"
     source.write_bytes(b"not-a-real-image")

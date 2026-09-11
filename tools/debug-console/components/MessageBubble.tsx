@@ -27,6 +27,7 @@ import {
   refToHref,
   type WikiRef,
 } from "@/lib/wiki-ref";
+import { downloadMarkdown } from "@/lib/chat-history";
 
 export type MessagePart =
   | { kind: "text"; text: string }
@@ -41,6 +42,13 @@ export interface UIMessage {
   memoryOptOut?: boolean;
   end_reason?: string;
   end_error?: string;
+  usage?: {
+    input_tokens?: number;
+    cached_input_tokens?: number;
+    output_tokens?: number;
+    duration_ms?: number;
+    tool_calls?: number;
+  };
   status?: { text: string; level?: "info" | "warn" };
   /** ANSWER 后验验证结果 */
   refValidation?: {
@@ -151,6 +159,10 @@ export function MessageBubble({
         .join("\n"),
     [msg.parts],
   );
+  const exportText = useMemo(
+    () => stripMemoryCandidateBlocks(cleanRefs(answerText)),
+    [answerText, cleanRefs],
+  );
   const candidates = useMemo(
     () =>
       msg.streaming || msg.memoryOptOut || !isAssistant
@@ -192,6 +204,17 @@ export function MessageBubble({
             <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--amber)] shadow-[0_0_6px_var(--amber)]" />
             {t("msg.streaming")}
           </span>
+        )}
+        {isAssistant && !msg.streaming && exportText && (
+          <button
+            onClick={() => downloadMarkdown(
+              `groundmap-answer-${new Date().toISOString().slice(0, 10)}-${seq}.md`,
+              `${exportText}\n`,
+            )}
+            className="ml-auto text-[10.5px] uppercase tracking-[0.16em] text-[var(--paper-mute)] hover:text-[var(--amber)]"
+          >
+            {t("msg.download_md")}
+          </button>
         )}
       </div>
 
@@ -396,6 +419,18 @@ export function MessageBubble({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {isAssistant && msg.usage && !msg.streaming && (
+        <div className="mt-3 font-mono text-[10.5px] text-[var(--paper-mute)]">
+          {t("msg.usage", {
+            input: msg.usage.input_tokens ?? "?",
+            cached: msg.usage.cached_input_tokens ?? 0,
+            output: msg.usage.output_tokens ?? "?",
+            seconds: ((msg.usage.duration_ms ?? 0) / 1000).toFixed(1),
+            tools: msg.usage.tool_calls ?? 0,
+          })}
         </div>
       )}
 

@@ -23,6 +23,11 @@ export interface ProviderInfo {
   is_agent: boolean;
   /** 不可用原因，UI 灰显时给 tooltip */
   unavailable_reason?: string;
+  capabilities: {
+    local_qa: boolean;
+    hybrid_qa: boolean;
+    hybrid_reason?: string;
+  };
 }
 
 /** 单次 turn 的输入：history 消息 + 系统 prompt + 工具集 */
@@ -96,7 +101,13 @@ export type AgentEvent =
   | {
       kind: "turn-end";
       reason: "stop" | "tool_use" | "length" | "error" | "budget_exceeded";
-      usage?: { input_tokens?: number; output_tokens?: number };
+      usage?: {
+        input_tokens?: number;
+        cached_input_tokens?: number;
+        output_tokens?: number;
+        duration_ms?: number;
+        tool_calls?: number;
+      };
       error_message?: string;
     }
   | {

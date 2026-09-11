@@ -55,11 +55,23 @@ export class CodexProvider implements Provider {
     //   2. 走 stdin 还能绕开 OS 的 argv 长度上限——system prompt 里塞了整份 root_index，可能很大。
     let proc;
     try {
-      proc = spawn(bin, ["exec", "--json", "-"], {
+      proc = spawn(
+        bin,
+        [
+          "exec",
+          "--json",
+          "--sandbox",
+          "read-only",
+          "--ephemeral",
+          "--ignore-user-config",
+          "-",
+        ],
+        {
         cwd,
         env: { ...process.env },
         stdio: ["pipe", "pipe", "pipe"],
-      });
+        },
+      );
     } catch (e) {
       yield {
         kind: "turn-end",
@@ -104,7 +116,9 @@ export class CodexProvider implements Provider {
 
     // turn 级元信息：usage 与失败原因都在事件流里，但最终 turn-end 统一由进程退出码收尾，
     // 这里只把它们「捞出来」附到收尾事件上——避免 translateCodexEvent 再发一个重复的 turn-end。
-    let usage: { input_tokens?: number; output_tokens?: number } | undefined;
+    let usage:
+      | { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number }
+      | undefined;
     let turnError: string | undefined;
 
     const lines = readLines(proc.stdout!);
@@ -123,6 +137,10 @@ export class CodexProvider implements Provider {
             const u = ev.usage as Record<string, unknown>;
             usage = {
               input_tokens: typeof u.input_tokens === "number" ? u.input_tokens : undefined,
+              cached_input_tokens:
+                typeof u.cached_input_tokens === "number"
+                  ? u.cached_input_tokens
+                  : undefined,
               output_tokens: typeof u.output_tokens === "number" ? u.output_tokens : undefined,
             };
           } else if (ev.type === "turn.failed") {

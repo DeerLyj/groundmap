@@ -1,6 +1,6 @@
 /**
  * GET /api/raw/<path>[?anchor=h-2-3-abc]
- * 读 raw/ 下的原始资料（用于悬浮预览）。严格只读。
+ * 读 raw/ 或 derived/ 下的 Markdown 证据（用于悬浮预览）。严格只读。
  *
  * - 无 anchor：返回整篇内容（fallback / 短文档）
  * - anchor 以 h- 开头：调 k.py read-section 返回完整 H 段
@@ -32,13 +32,13 @@ interface BlockResult {
 export async function GET(req: NextRequest, { params }: { params: { path: string[] } }) {
   const relPath = params.path.map((s) => decodeURIComponent(s)).join("/");
 
-  // 必须在 raw/ 下；同时挡 raw/../wiki/x.md 这种 startsWith 匹配但 .. 把
-  // 实际目标推到 raw/ 之外的形式（用 normalize 后再次校验）
+  // 只允许 raw/、derived/ 下的 Markdown；二进制原件统一走 /api/assets。
   const normalized = relPath.replace(/\\/g, "/").replace(/\/+\.\/+/g, "/");
   if (
-    !relPath.startsWith("raw/") ||
+    !(relPath.startsWith("raw/") || relPath.startsWith("derived/")) ||
+    !relPath.toLowerCase().endsWith(".md") ||
     !isSafeRelPath(relPath) ||
-    !normalized.startsWith("raw/") ||
+    !(normalized.startsWith("raw/") || normalized.startsWith("derived/")) ||
     normalized.includes("/../") ||
     normalized.startsWith("../")
   ) {

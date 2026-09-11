@@ -93,6 +93,12 @@ tools/debug-console/out/
 .env
 .env.*
 !.env.example
+test-kit/.setup-complete
+test-kit/.sensitive-markers.local
+test-kit/.runtime/
+test-kit/.chart-data-*/
+test-kit/demo-data/
+/dist/
 *.pem
 *.key
 *.p12

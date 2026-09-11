@@ -46,7 +46,7 @@ class TestSearch:
         target = fake_kb / "derived" / "papers" / "ground-station.md"
         target.parent.mkdir(parents=True)
         target.write_text(
-            "# Ground Station\n\n中孟海洋遥感卫星地面站由两家机构共同建设。\n",
+            "# Ground Station\n\n甲乙海洋遥感卫星地面站由两家虚构机构共同建设。\n",
             encoding="utf-8",
         )
         decoy = fake_kb / "derived" / "papers" / "long-decoy.md"

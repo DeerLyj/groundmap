@@ -1,4 +1,4 @@
-"""Project state, decision records, and portable context packs.
+"""Project state, decision/execution records, and portable context packs.
 
 Project files live outside wiki/ so project state is not mistaken for durable
 knowledge. The module is deliberately filesystem-based and deterministic.
@@ -33,6 +33,12 @@ STATE_STATUSES = {"active", "paused", "blocked", "completed", "archived"}
 DECISION_STATUSES = {"open", "pending_validation", "executed", "reviewed", "deprecated"}
 CONFIRMABLE_DECISION_STATUSES = {"executed", "reviewed"}
 DECISION_REQUIRED_FIELDS = ("decision_id", "project_id", "decision_status", "decision_date")
+EXECUTION_REQUIRED_FIELDS = ("execution_id", "project_id", "recorded_at", "last_modified_by")
+EXECUTION_SECTIONS = {
+    "action": ("行动", "Action"),
+    "result": ("结果", "Result"),
+    "revision": ("修正", "Revision"),
+}
 
 
 class ProjectDataError(ValueError):
@@ -144,6 +150,71 @@ def _decision_record(path: Path, root: Path, project_id: str) -> dict:
     }
 
 
+def _execution_paths(project_dir: Path) -> list[Path]:
+    directory = project_dir / "progress"
+    if not directory.is_dir():
+        return []
+    return sorted(path for path in directory.glob("*.md") if path.is_file())
+
+
+def _validate_execution(doc: dict, project_id: str) -> list[str]:
+    fm = doc["frontmatter"]
+    errors = [
+        f"执行记录缺少必填字段: {field}"
+        for field in EXECUTION_REQUIRED_FIELDS
+        if field not in fm
+    ]
+    if fm.get("project_id") != project_id:
+        errors.append(f"执行记录 project_id 与项目不一致: {fm.get('project_id')!r} != {project_id!r}")
+    if not _iso(fm.get("recorded_at")):
+        errors.append("recorded_at 不能为空")
+    for field, aliases in EXECUTION_SECTIONS.items():
+        if not any(doc["sections"].get(name, "").strip() for name in aliases):
+            errors.append(f"执行记录缺少非空章节: {field}（{' / '.join(aliases)}）")
+    return errors
+
+
+def _execution_record(path: Path, root: Path, project_id: str) -> dict:
+    doc = _read_doc(path, root, "执行记录")
+    errors = _validate_execution(doc, project_id)
+    fm = doc["frontmatter"]
+    return {
+        "path": doc["path"],
+        "title": str(fm.get("title") or fm.get("execution_id") or path.stem),
+        "execution_id": str(fm.get("execution_id") or ""),
+        "project_id": str(fm.get("project_id") or ""),
+        "recorded_at": _iso(fm.get("recorded_at")),
+        "confirmed": fm.get("last_modified_by") == "Human",
+        "frontmatter": fm,
+        "content": doc["content"],
+        "sections": doc["sections"],
+        "errors": errors,
+    }
+
+
+def _control_loop(project_dir: Path, state: dict, decisions: list[dict], executions: list[dict]) -> dict:
+    confirmed_decisions = sum(
+        decision["decision_status"] in CONFIRMABLE_DECISION_STATUSES
+        and decision["frontmatter"].get("last_modified_by") == "Human"
+        for decision in decisions
+    )
+    confirmed_executions = sum(execution["confirmed"] for execution in executions)
+    checks = {
+        "brief_exists": (project_dir / "brief.md").is_file(),
+        "state_confirmed": state["frontmatter"].get("last_modified_by") == "Human",
+        "two_confirmed_decisions": confirmed_decisions >= 2,
+        "confirmed_execution": confirmed_executions >= 1,
+        "context_pack_exists": (project_dir / "context.md").is_file(),
+    }
+    return {
+        "complete": all(checks.values()),
+        "checks": checks,
+        "confirmed_decision_count": confirmed_decisions,
+        "confirmed_execution_count": confirmed_executions,
+        "missing": [name for name, passed in checks.items() if not passed],
+    }
+
+
 def list_projects(projects_root: Path, status: str | None = None) -> list[dict]:
     if not projects_root.is_dir():
         return []
@@ -161,7 +232,9 @@ def list_projects(projects_root: Path, status: str | None = None) -> list[dict]:
             "current_outcome": "",
             "next_action": "",
             "decision_count": len(_decision_paths(directory)),
+            "execution_count": len(_execution_paths(directory)),
             "state_confirmed": False,
+            "control_loop": None,
             "valid": False,
             "errors": [],
         }
@@ -181,6 +254,22 @@ def list_projects(projects_root: Path, status: str | None = None) -> list[dict]:
                     valid=not errors,
                     errors=errors,
                 )
+                decisions = [
+                    _decision_record(path, projects_root.parent, directory.name)
+                    for path in _decision_paths(directory)
+                ]
+                executions = [
+                    _execution_record(path, projects_root.parent, directory.name)
+                    for path in _execution_paths(directory)
+                ]
+                record_errors = [
+                    error
+                    for record in decisions + executions
+                    for error in record["errors"]
+                ]
+                item["errors"].extend(record_errors)
+                item["valid"] = not item["errors"]
+                item["control_loop"] = _control_loop(directory, state, decisions, executions)
             except ProjectDataError as exc:
                 item["errors"] = [str(exc)]
         if status is None or item["status"] == status:
@@ -201,11 +290,15 @@ def load_project(projects_root: Path, project_id: str, decision_status: str | No
     if state_errors:
         raise ProjectDataError("；".join(state_errors))
 
-    decisions = []
+    all_decisions = []
     for path in _decision_paths(directory):
         decision = _decision_record(path, projects_root.parent, project_id)
         if decision["errors"]:
             raise ProjectDataError("；".join(decision["errors"]))
+        all_decisions.append(decision)
+
+    decisions = []
+    for decision in all_decisions:
         decision_date = decision["decision_date"]
         if decision_status and decision["decision_status"] != decision_status:
             continue
@@ -214,6 +307,13 @@ def load_project(projects_root: Path, project_id: str, decision_status: str | No
         if date_to and decision_date > date_to:
             continue
         decisions.append(decision)
+
+    executions = []
+    for path in _execution_paths(directory):
+        execution = _execution_record(path, projects_root.parent, project_id)
+        if execution["errors"]:
+            raise ProjectDataError("；".join(execution["errors"]))
+        executions.append(execution)
 
     brief_path = directory / "brief.md"
     brief = _read_doc(brief_path, projects_root.parent, "brief.md") if brief_path.is_file() else None
@@ -234,6 +334,8 @@ def load_project(projects_root: Path, project_id: str, decision_status: str | No
             "confirmed": state["frontmatter"].get("last_modified_by") == "Human",
         },
         "decisions": decisions,
+        "executions": executions,
+        "control_loop": _control_loop(directory, state, all_decisions, executions),
     }
 
 
@@ -279,7 +381,7 @@ def build_context_pack(project: dict, max_chars: int = 30000) -> str:
         f"# Context Pack: {title}\n\n"
         f"- project_id: `{project['project']['project_id']}`\n"
         f"- state source: `{state['path']}`\n"
-        f"- this file is generated; edit state.md / brief.md / decisions instead.\n",
+        f"- this file is generated; edit state.md / brief.md / decisions / progress instead.\n",
         "## 项目目标与范围\n\n" + _clip(brief["content"] if brief else str(fm.get("current_outcome") or "未提供项目 brief。"), 7000),
         "## 当前状态\n\n"
         f"- 状态：{fm.get('status', '未知')}\n"
@@ -291,6 +393,24 @@ def build_context_pack(project: dict, max_chars: int = 30000) -> str:
         f"- 阻塞：{', '.join(_as_list(fm.get('blocked_by'))) or '未记录'}\n\n"
         + _clip(state["content"], 7000),
     ]
+
+    execution_lines = []
+    for execution in project["executions"]:
+        confirmation = "Human 已确认" if execution["confirmed"] else "待 Human 确认"
+        execution_lines.append(
+            f"### {execution['title']}（{execution['recorded_at']}，{confirmation}）\n"
+            f"来源文件：`{execution['path']}`\n\n{_clip(execution['content'], 5000)}"
+        )
+    control = project["control_loop"]
+    blocks.append(
+        "## 执行闭环\n\n"
+        f"- P2 闭环：{'完成' if control['complete'] else '未完成'}\n"
+        f"- 已确认关键决策：{control['confirmed_decision_count']} / 2\n"
+        f"- 已确认执行记录：{control['confirmed_execution_count']} / 1\n"
+        + (f"- 待补检查：{', '.join(control['missing'])}\n" if control["missing"] else "")
+        + "\n"
+        + ("\n\n".join(execution_lines) if execution_lines else "暂无行动—结果—修正记录。")
+    )
 
     confirmed = [
         d for d in project["decisions"]
@@ -312,7 +432,7 @@ def build_context_pack(project: dict, max_chars: int = 30000) -> str:
                 )
     blocks.append("## 决策记录\n\n" + ("\n".join(decision_lines).strip() or "暂无决策记录。"))
 
-    links = _links(brief, state, *project["decisions"])
+    links = _links(brief, state, *project["decisions"], *project["executions"])
     refs = []
     for value in _as_list(fm.get("knowledge_refs")) + _as_list(fm.get("decision_refs")):
         match = WIKILINK_RE.search(value)
@@ -330,7 +450,7 @@ def build_context_pack(project: dict, max_chars: int = 30000) -> str:
         "## 风险、假设与未知\n\n"
         + ("\n\n".join(assumptions) if assumptions else "暂无已登记的决策假设。")
         + (f"\n\n### 状态页登记\n\n{_clip(risks, 4500)}" if risks else "\n\n状态页未登记风险或未知信息；不得补猜。")
-        + "\n\n- 未经用户确认的事实、记忆和决策不得视为已生效。"
+        + "\n\n- 未经用户确认的事实、记忆、决策和执行记录不得视为已生效。"
     )
 
     output = "\n\n".join(blocks).strip() + "\n"
@@ -355,6 +475,11 @@ def write_context(path: Path, content: str) -> None:
 def build_and_write(projects_root: Path, project_id: str, max_chars: int = 30000,
                     write: bool = True) -> dict:
     project = load_project(projects_root, project_id)
+    if write:
+        control = project["control_loop"]
+        control["checks"]["context_pack_exists"] = True
+        control["missing"] = [name for name, passed in control["checks"].items() if not passed]
+        control["complete"] = not control["missing"]
     content = build_context_pack(project, max_chars)
     path = projects_root / project_id / "context.md"
     if write:
@@ -374,16 +499,17 @@ def confirm_project_record(
     decision_id: str | None = None,
     decision_status: str | None = None,
     note: str = "",
+    execution_id: str | None = None,
 ) -> dict:
-    """Mark one explicitly selected state or decision as human-confirmed."""
-    if target not in {"state", "decision"}:
-        raise ProjectDataError("target 必须是 state 或 decision")
+    """Mark one explicitly selected state, decision, or execution as human-confirmed."""
+    if target not in {"state", "decision", "execution"}:
+        raise ProjectDataError("target 必须是 state、decision 或 execution")
     project = load_project(projects_root, project_id)
     now = date.today().isoformat()
 
     if target == "state":
-        if decision_id or decision_status:
-            raise ProjectDataError("确认 state 时不能指定 decision_id 或 decision_status")
+        if decision_id or decision_status or execution_id:
+            raise ProjectDataError("确认 state 时不能指定记录 ID 或 decision_status")
         path = projects_root / project_id / "state.md"
         post = frontmatter.load(path)
         post.metadata["last_modified_by"] = "Human"
@@ -396,9 +522,11 @@ def confirm_project_record(
             "confirmed_by": "Human",
             "confirmed_at": now,
         }
-    else:
+    elif target == "decision":
         if not decision_id:
             raise ProjectDataError("确认 decision 时必须指定 decision_id")
+        if execution_id:
+            raise ProjectDataError("确认 decision 时不能指定 execution_id")
         matches = [d for d in project["decisions"] if d["decision_id"] == decision_id]
         if len(matches) != 1:
             raise ProjectDataError(f"未找到唯一决策记录: {decision_id}")
@@ -421,13 +549,34 @@ def confirm_project_record(
             "confirmed_by": "Human",
             "confirmed_at": now,
         }
+    else:
+        if not execution_id:
+            raise ProjectDataError("确认 execution 时必须指定 execution_id")
+        if decision_id or decision_status:
+            raise ProjectDataError("确认 execution 时不能指定 decision_id 或 decision_status")
+        matches = [e for e in project["executions"] if e["execution_id"] == execution_id]
+        if len(matches) != 1:
+            raise ProjectDataError(f"未找到唯一执行记录: {execution_id}")
+        execution = matches[0]
+        path = projects_root.parent / execution["path"]
+        post = frontmatter.load(path)
+        post.metadata["last_modified_by"] = "Human"
+        post.metadata["last_confirmed_at"] = now
+        result = {
+            "project_id": project_id,
+            "target": "execution",
+            "execution_id": execution_id,
+            "path": execution["path"],
+            "confirmed_by": "Human",
+            "confirmed_at": now,
+        }
 
     write_context(path, frontmatter.dumps(post))
     log_path = projects_root.parent / "log.md"
     log_entry = (
         f"\n## [{now}] confirm | {project_id}\n"
         f"- 确认对象：{target}"
-        + (f" {decision_id}" if decision_id else "")
+        + (f" {decision_id or execution_id}" if decision_id or execution_id else "")
         + f"（{result.get('path')}）。\n"
         "- 操作者：Human；仅更新 frontmatter 的确认标记，正文与证据入口未改。\n"
         + (f"- 备注：{note.strip()}\n" if note.strip() else "")

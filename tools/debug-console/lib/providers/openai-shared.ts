@@ -102,7 +102,9 @@ export async function* streamOpenAI(
     { id?: string; name?: string; argsText: string }
   >();
   let finishReason: string | undefined;
-  let usage: { input_tokens?: number; output_tokens?: number } | undefined;
+  let usage:
+    | { input_tokens?: number; cached_input_tokens?: number; output_tokens?: number }
+    | undefined;
 
   try {
     for await (const chunk of stream) {
@@ -138,10 +140,6 @@ export async function* streamOpenAI(
         finishReason = choice.finish_reason;
       }
       if (chunk.usage) {
-        usage = {
-          input_tokens: chunk.usage.prompt_tokens,
-          output_tokens: chunk.usage.completion_tokens,
-        };
         // DeepSeek（及兼容实现）会在 usage 里回 prompt_cache_hit_tokens /
         // prompt_cache_miss_tokens —— 服务端自动前缀缓存的命中情况。
         // 系统 prompt + 工具 schema + 预热的 root_index 构成稳定前缀，agent-loop 只
@@ -150,6 +148,11 @@ export async function* streamOpenAI(
         const cu = chunk.usage as unknown as {
           prompt_cache_hit_tokens?: number;
           prompt_cache_miss_tokens?: number;
+        };
+        usage = {
+          input_tokens: chunk.usage.prompt_tokens,
+          cached_input_tokens: cu.prompt_cache_hit_tokens,
+          output_tokens: chunk.usage.completion_tokens,
         };
         if (
           typeof cu.prompt_cache_hit_tokens === "number" ||

@@ -108,6 +108,12 @@ from context_pack import (
     list_projects as list_project_states,
     load_project,
 )
+from deliverables import (
+    DELIVERABLE_KINDS,
+    confirm_deliverable,
+    create_deliverable,
+    list_deliverables,
+)
 
 
 # ============================================================
@@ -3090,6 +3096,8 @@ def fmt_project_list(items: list[dict]):
         print(
             f"  {valid} [{item.get('status') or 'invalid':10}] "
             f"{item['project_id']}  · 决策 {item.get('decision_count', 0)}  "
+            f"· 执行 {item.get('execution_count', 0)}  "
+            f"· 闭环 {'✅' if (item.get('control_loop') or {}).get('complete') else '待补'}  "
             f"→ {item['state_path']}"
         )
         if item.get("next_action"):
@@ -3107,8 +3115,17 @@ def fmt_project_show(data: dict):
     print(f"状态文件: {state['path']}")
     if data.get("brief"):
         print(f"Brief: {data['brief']['path']}")
-    print(f"决策记录: {len(data['decisions'])} 条\n")
+    control = data["control_loop"]
+    print(
+        f"决策记录: {len(data['decisions'])} 条  "
+        f"执行记录: {len(data['executions'])} 条  "
+        f"P2 闭环: {'完成' if control['complete'] else '未完成'}\n"
+    )
     print(state["content"] or "（状态正文为空）")
+    for execution in data["executions"]:
+        confirmation = "Human 已确认" if execution["confirmed"] else "待 Human 确认"
+        print(f"\n--- {execution['title']} [{execution['recorded_at']} · {confirmation}] ---")
+        print(f"{execution['path']}\n{execution['content']}")
     for decision in data["decisions"]:
         print(f"\n--- {decision['title']} [{decision['decision_status']}] ---")
         print(f"{decision['path']}\n{decision['content']}")
@@ -3118,6 +3135,22 @@ def fmt_context_build(data: dict):
     action = "已写入" if data.get("written") else "仅生成"
     print(f"✅ Context Pack {action}: {data['context_path']}")
     print(data["context"])
+
+
+def fmt_deliverables(items: list[dict]):
+    if not items:
+        print("（暂无成果版本）")
+        return
+    print(f"成果版本（{len(items)} 个）：\n")
+    for item in items:
+        marker = "✅" if item.get("reviewed") else "📝"
+        print(
+            f"  {marker} {item['project_id']}/{item['deliverable_id']} "
+            f"v{item['version']:03d} · {item['kind']} · {item['status']}"
+        )
+        print(f"    {item['path']} · 来源 {len(item.get('source_refs', []))}")
+        for error in item.get("errors", []):
+            print(f"    错误: {error}")
 
 
 def fmt_bare_claims(items: list[dict]):
@@ -3168,6 +3201,7 @@ _WORKSPACE_SKELETON = (
     "wiki/analyses",
     "wiki/indexes",
     "wiki/memory/candidates",
+    "projects",
     "raw/articles",
     "raw/papers",
     "derived",
@@ -3196,7 +3230,7 @@ def create_workspace(name: str) -> dict:
     for sub_dir in _WORKSPACE_SKELETON:
         (ws / sub_dir).mkdir(parents=True)
     for keep in (
-        "exports", "my_thoughts", "raw/articles", "raw/papers", "derived",
+        "exports", "my_thoughts", "projects", "raw/articles", "raw/papers", "derived",
     ):
         (ws / keep / ".gitkeep").write_text("", encoding="utf-8")
 
@@ -3407,7 +3441,7 @@ def _main_impl():
 
     p_project = sub.add_parser(
         "project-show",
-        help="显示一个项目的状态、brief 和决策记录",
+        help="显示一个项目的状态、brief、决策与执行记录",
         parents=[common],
     )
     p_project.add_argument("project_id")
@@ -3429,14 +3463,45 @@ def _main_impl():
 
     p_confirm = sub.add_parser(
         "project-confirm",
-        help="显式确认一个项目状态或决策记录",
+        help="显式确认一个项目状态、决策或执行记录",
         parents=[common],
     )
     p_confirm.add_argument("project_id")
-    p_confirm.add_argument("target", choices=["state", "decision"])
-    p_confirm.add_argument("decision_id", nargs="?")
+    p_confirm.add_argument("target", choices=["state", "decision", "execution"])
+    p_confirm.add_argument("record_id", nargs="?")
     p_confirm.add_argument("--decision-status", choices=["reviewed", "executed"])
     p_confirm.add_argument("--note", default="")
+
+    p_deliverable_create = sub.add_parser(
+        "deliverable-create",
+        help="创建一个带本地证据与版本号的成果草稿",
+        parents=[common],
+    )
+    p_deliverable_create.add_argument("project_id")
+    p_deliverable_create.add_argument("deliverable_id")
+    p_deliverable_create.add_argument("--kind", required=True, choices=sorted(DELIVERABLE_KINDS))
+    p_deliverable_create.add_argument("--title", required=True)
+    p_deliverable_create.add_argument(
+        "--source-ref", action="append", required=True,
+        help="本地证据路径；可重复传入，可包含 #anchor",
+    )
+
+    p_deliverable_list = sub.add_parser(
+        "deliverable-list",
+        help="列出成果的全部保留版本",
+        parents=[common],
+    )
+    p_deliverable_list.add_argument("--project-id")
+
+    p_deliverable_confirm = sub.add_parser(
+        "deliverable-confirm",
+        help="显式确认一个成果版本，并回写项目 state.md",
+        parents=[common],
+    )
+    p_deliverable_confirm.add_argument("project_id")
+    p_deliverable_confirm.add_argument("deliverable_id")
+    p_deliverable_confirm.add_argument("version", type=int)
+    p_deliverable_confirm.add_argument("--note", default="")
 
     args = parser.parse_args()
     # 合并：父级 --json 或子级 --json 任意为 True 即输出 JSON
@@ -3558,9 +3623,10 @@ def _main_impl():
                 PROJECT_ROOT / "projects",
                 args.project_id,
                 args.target,
-                args.decision_id,
+                args.record_id if args.target == "decision" else None,
                 args.decision_status,
                 args.note,
+                args.record_id if args.target == "execution" else None,
             )
         except ProjectDataError as exc:
             print(f"错误: {exc}", file=sys.stderr)
@@ -3569,6 +3635,55 @@ def _main_impl():
             output_json(result)
         else:
             print(f"✅ 已确认 {result['target']}: {result['path']}")
+        return
+
+    if args.cmd == "deliverable-create":
+        try:
+            result = create_deliverable(
+                PROJECT_ROOT,
+                args.project_id,
+                args.deliverable_id,
+                args.kind,
+                args.title,
+                args.source_ref,
+            )
+        except ProjectDataError as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if args.json:
+            output_json(result)
+        else:
+            print(f"✅ 已创建成果草稿 v{result['version']:03d}: {result['path']}")
+        return
+
+    if args.cmd == "deliverable-list":
+        try:
+            result = list_deliverables(PROJECT_ROOT, args.project_id)
+        except ProjectDataError as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if args.json:
+            output_json(result)
+        else:
+            fmt_deliverables(result)
+        return
+
+    if args.cmd == "deliverable-confirm":
+        try:
+            result = confirm_deliverable(
+                PROJECT_ROOT,
+                args.project_id,
+                args.deliverable_id,
+                args.version,
+                args.note,
+            )
+        except ProjectDataError as exc:
+            print(f"错误: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if args.json:
+            output_json(result)
+        else:
+            print(f"✅ 已确认成果版本: {result['path']}")
         return
 
     pages = load_search_pages() if args.cmd == "search" else load_all_wiki_pages()

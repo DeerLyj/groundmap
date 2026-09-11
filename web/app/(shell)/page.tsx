@@ -59,7 +59,7 @@ function Welcome({
           {t("home.open_root", locale)}
         </Link>
       </div>
-      <PageRenderer content={content} />
+      <PageRenderer content={content} sourcePath={path} />
     </div>
   );
 }

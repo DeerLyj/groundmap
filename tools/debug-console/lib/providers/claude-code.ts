@@ -69,9 +69,8 @@ export class ClaudeCodeProvider implements Provider {
     //   -p                              非交互模式
     //   --output-format stream-json     行分隔 JSON 事件流（供我们 parse）
     //   --verbose                       stream-json 需要它来 emit 完整事件（CC 要求）
-    //   --dangerously-skip-permissions  关闭工具权限询问。Node subprocess 无 TTY,
-    //                                   一旦 CC 试图问 "允许 Read 该文件吗？" 就永远卡死。
-    //                                   debug-console 用户已知会让 CC 自由用 Read/Grep。
+    //   --disallowedTools              查询控制台只读：禁止原生 Web、Shell 与写工具。
+    //                                   Hybrid 的 Web 摘要由服务端受控注入，不允许 Agent 自行联网。
     // prompt 走 stdin（"-" 占位）—— 比 CLI arg 稳，避免 OS arg 长度限制 / 转义错乱
     // 注：未加 --include-partial-messages —— 它会让 CC 多 emit 一类 partial 事件，
     // 与现有 assistant 事件叠加会导致 text-delta 双倍。CC 默认一次性返回完整文本，
@@ -84,7 +83,8 @@ export class ClaudeCodeProvider implements Provider {
       "--output-format",
       "stream-json",
       "--verbose",
-      "--dangerously-skip-permissions",
+      "--disallowedTools",
+      "WebSearch,WebFetch,Bash,Write,Edit,NotebookEdit",
     ];
     if (input.system) {
       args.push("--append-system-prompt", input.system);

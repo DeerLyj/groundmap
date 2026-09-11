@@ -40,7 +40,19 @@ npm run dev         # 端口 3100
 | `KB_API_BASE` | 主管理台地址（默认 `http://localhost:3006`） |
 | `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | 各 LLM provider 的 key，按需配置；未填的 provider 在 UI 中灰显 |
 | `OPENAI_BASE_URL` | OpenAI 兼容端点自定义 baseURL（Moonshot / Qwen / 自建网关）；空 = 官方 |
+| `WEB_SEARCH_MODEL` | DeepSeek Web Search 模型，默认 `deepseek-v4-flash`；复用 `DEEPSEEK_API_KEY` |
 | `CLAUDE_CODE_BIN` / `CODEX_BIN` | 本地 CLI agent 的二进制名（PATH 中可执行即可） |
+
+## Local / Hybrid 问答
+
+联网开关默认是 **Local only**。每一轮都会先执行本地 `search`：
+
+- Local：绝不调用控制台的 Web Search；只允许本地 KB 来源与明确标注的模型推断。
+- Local + Web：每轮先查本地知识库，再强制调用 DeepSeek Web Search 作为补充。
+- Provider 列表通过 `capabilities.hybrid_qa` 暴露 Hybrid 是否可用；未配置 `DEEPSEEK_API_KEY` 时，联网按钮保持禁用。
+- 本地来源显示为 `[LOCAL]` 和 `[[wiki/...]]`；Web 来源显示为 `[WEB]`、普通 Markdown 链接和 ISO 访问时间。没有可验证 URL 的 Web 响应按失败处理。
+- Web 结果只存在于本轮 SSE 与模型上下文中。控制台的 KB 通道仍是只读白名单，不会把 Web 内容自动写入 Wiki。
+- Claude Code 禁用原生 Web、Shell 和写工具；Codex 使用只读临时沙箱并忽略用户扩展。两者都只消费服务端提供的 Hybrid Web 摘要。
 
 ### API key 怎么提供？（重要）
 
@@ -64,6 +76,13 @@ npm run dev                   # 重启生效（Next.js 启动时读 .env）
 - **想重新开启思考**：删掉 `deepseek.ts` 里 `streamOpenAI(...)` 的第 4 个参数 `{ thinking: { type: "disabled" } }` 即可。
 - 控制台已支持**流式展示推理过程**（provider 发 `reasoning-delta` → 前端渲染为可折叠的「思考过程」区块）：用任何**开着**思考的推理模型时，思考会实时显示、不再静默。关思考时此区块自然不出现。
 - ⚠️ 注意：DeepSeek 不接受 `reasoning_effort: "none"`（会 400 报错），关思考的唯一开关是 `thinking: { type: "disabled" }`。
+
+## 会话恢复与 Markdown 下载
+
+- 当前会话会自动保存到浏览器本地，并按 workspace / project 隔离；刷新页面后可继续。
+- 顶栏“历史会话”可重新打开最近 20 个会话；“新建对话”保留当前会话后开始新的会话，“清空记录”删除当前会话。
+- 本地历史只保存用户问题、最终回答、引用校验和用量，不保存推理过程或完整工具返回；不会上传到服务端、写入知识库或跨浏览器同步。
+- 每条 AI 回答可单独下载 `.md`，顶栏可下载包含当前问答和运行元数据的完整会话 `.md`。
 
 ## 与主站的契约
 

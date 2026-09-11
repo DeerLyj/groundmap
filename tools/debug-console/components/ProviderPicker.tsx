@@ -9,15 +9,21 @@ export interface ProviderInfo {
   unavailable_reason?: string;
   models: string[];
   is_agent: boolean;
+  capabilities: {
+    local_qa: boolean;
+    hybrid_qa: boolean;
+    hybrid_reason?: string;
+  };
 }
 
 interface Props {
   provider: string;
   model: string;
   onChange: (provider: string, model: string) => void;
+  onCapabilitiesChange?: (capabilities: ProviderInfo["capabilities"]) => void;
 }
 
-export function ProviderPicker({ provider, model, onChange }: Props) {
+export function ProviderPicker({ provider, model, onChange, onCapabilitiesChange }: Props) {
   const t = useT();
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -34,7 +40,12 @@ export function ProviderPicker({ provider, model, onChange }: Props) {
         const cur = list.find((p) => p.id === provider);
         if (!cur || !cur.available) {
           const firstAvail = list.find((p) => p.available);
-          if (firstAvail) onChange(firstAvail.id, firstAvail.models[0] || "");
+          if (firstAvail) {
+            onChange(firstAvail.id, firstAvail.models[0] || "");
+            onCapabilitiesChange?.(firstAvail.capabilities);
+          }
+        } else {
+          onCapabilitiesChange?.(cur.capabilities);
         }
       })
       .catch(() => setLoading(false));
@@ -66,6 +77,7 @@ export function ProviderPicker({ provider, model, onChange }: Props) {
             const newProv = providers.find((p) => p.id === newProvId);
             const newModel = newProv?.models[0] || "";
             onChange(newProvId, newModel);
+            if (newProv) onCapabilitiesChange?.(newProv.capabilities);
           }}
           className="k-select min-w-[140px]"
         >

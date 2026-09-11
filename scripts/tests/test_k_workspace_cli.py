@@ -80,6 +80,7 @@ class TestCreateWorkspace:
         assert (ws / "log.md").is_file()
         # raw/exports/my_thoughts 留 .gitkeep 保结构
         assert (ws / "exports" / ".gitkeep").is_file()
+        assert (ws / "projects" / ".gitkeep").is_file()
         assert (ws / "my_thoughts" / ".gitkeep").is_file()
         assert (ws / "wiki" / "memory").is_dir()
         assert (ws / "wiki" / "memory" / "candidates").is_dir()

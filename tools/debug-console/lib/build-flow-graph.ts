@@ -192,7 +192,7 @@ function classifyCall(name: string, args: Record<string, unknown>): {
       isBlock: anchor ? /^[ptcf]-/.test(anchor) : false,
     };
   }
-  if (name === "search" || name === "Grep" || name === "Glob") {
+  if (name === "search" || name === "web_search" || name === "Grep" || name === "Glob") {
     const q =
       (typeof args.query === "string" && args.query) ||
       (typeof args.pattern === "string" && args.pattern) || "";

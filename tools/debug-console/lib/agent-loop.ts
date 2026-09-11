@@ -29,6 +29,7 @@ import {
 } from "./mode-augment";
 import { collectRefs } from "./wiki-ref";
 import { verifyBlockCitations } from "./verify-citations";
+import { createRunMetrics } from "./run-metrics";
 
 export interface AgentRunInput {
   provider: Provider;
@@ -82,6 +83,7 @@ export async function* runAgent(
   // ANSWER 续写状态：累积所有 assistant 文本 + 是否已经续写过
   let totalAssistantText = "";
   let forcedAnswerOnce = false;
+  const runMetrics = createRunMetrics();
 
   // 来源注册表：本轮对话中所有成功读取过的文件路径（防幻觉白名单）
   const availableSources = new Set<string>(input.preloadedSources ?? []);
@@ -215,9 +217,15 @@ export async function* runAgent(
           totalAssistantText += evt.text;
         }
         if (evt.kind === "tool-call") {
+          runMetrics.recordToolCall();
           callsById.set(evt.id, { name: evt.name, args: evt.args });
         }
-        yield evt;
+        if (evt.kind === "turn-end") {
+          runMetrics.recordUsage(evt);
+          yield runMetrics.withMetrics(evt);
+        } else {
+          yield evt;
+        }
         if (evt.kind === "tool-result") {
           const triggerCall = callsById.get(evt.id);
           if (triggerCall) {
@@ -294,6 +302,7 @@ export async function* runAgent(
       } else if (evt.kind === "turn-end") {
         finEnd = evt;
       } else if (evt.kind === "tool-call") {
+        runMetrics.recordToolCall();
         // 工具已禁用，正常不会触发；防御性忽略，避免悬空 tool_call
       } else {
         yield evt;
@@ -304,7 +313,10 @@ export async function* runAgent(
     }
     const allText = gatherAssistantText(messages);
     if (allText) yield* validateAnswerRefs(allText);
-    yield finEnd ?? { kind: "turn-end", reason: "stop" };
+    if (finEnd?.kind === "turn-end") runMetrics.recordUsage(finEnd);
+    yield runMetrics.withMetrics(
+      finEnd?.kind === "turn-end" ? finEnd : { kind: "turn-end", reason: "stop" },
+    );
   }
 
   while (turnIdx < MAX_TURNS) {
@@ -330,6 +342,7 @@ export async function* runAgent(
         totalAssistantText += evt.text;
         yield evt;
       } else if (evt.kind === "tool-call") {
+        runMetrics.recordToolCall();
         turnToolCalls.push({ id: evt.id, name: evt.name, args: evt.args });
         yield evt;
       } else if (evt.kind === "turn-end") {
@@ -343,6 +356,8 @@ export async function* runAgent(
       yield { kind: "turn-end", reason: "error", error_message: "provider 未发送 turn-end" };
       return;
     }
+
+    runMetrics.recordUsage(turnEndEvent);
 
     const reason = (turnEndEvent as { reason: string }).reason;
 
@@ -459,7 +474,7 @@ export async function* runAgent(
       }
     }
 
-    yield turnEndEvent;
+    yield runMetrics.withMetrics(turnEndEvent);
     return;
   }
 

@@ -8,19 +8,27 @@
  *     system?: string,
  *     messages: ChatMessage[],   // 完整历史，包括最新的 user 消息
  *     tool_budget?: number,
+ *     network_mode?: 'local' | 'hybrid', // 默认 local；hybrid 仍然先查本地
  *     project_id?: string,        // 可选：预加载当前项目 Context Pack
  *   }
  *
  * 响应：text/event-stream，每行 `data: <AgentEvent json>\n\n`
  */
 import { NextRequest, NextResponse } from "next/server";
+import { appendFile, mkdir } from "node:fs/promises";
+import path from "node:path";
 import { z } from "zod";
 import { getProvider } from "@/lib/providers";
-import type { ProviderId } from "@/lib/providers/types";
+import type { AgentEvent, ProviderId } from "@/lib/providers/types";
 import { runAgent } from "@/lib/agent-loop";
 import { sseLine } from "@/lib/sse";
 import { DEFAULT_SYSTEM_PROMPT } from "@/lib/default-system-prompt";
 import { executeTool, workspaceContext } from "@/lib/kb-http-client";
+import {
+  appendHybridContext,
+  prepareHybridQuery,
+  webSearchCapability,
+} from "@/lib/hybrid-query";
 
 /**
  * 预热：root_index 内存缓存（5 分钟 TTL）。
@@ -140,6 +148,14 @@ async function getProjectContext(projectId: string | undefined): Promise<string>
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
+async function appendRunMetric(metric: Record<string, unknown>) {
+  const target = process.env.KB_METRICS_FILE
+    ? path.resolve(process.env.KB_METRICS_FILE)
+    : path.resolve(process.cwd(), ".cache", "run-metrics.jsonl");
+  await mkdir(path.dirname(target), { recursive: true });
+  await appendFile(target, `${JSON.stringify(metric)}\n`, "utf8");
+}
+
 const ChatMessageSchema = z.object({
   role: z.enum(["user", "assistant"]),
   text: z.string().optional(),
@@ -171,6 +187,7 @@ const RequestSchema = z.object({
   messages: z.array(ChatMessageSchema).min(1).max(50),
   tool_budget: z.number().int().min(1).max(50).optional(),
   mode: z.enum(["quick", "audit", "explore", "devil"]).optional(),
+  network_mode: z.enum(["local", "hybrid"]).default("local"),
   // 「自动识别」用：要查的 workspace；空则 web 回退默认。合法性由 web 的 resolveWorkspace 兜底校验。
   workspace: z.string().regex(/^[A-Za-z0-9_-]+$/).optional(),
   project_id: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/).optional(),
@@ -200,6 +217,7 @@ export async function POST(req: NextRequest) {
     messages,
     tool_budget,
     mode,
+    network_mode,
     workspace,
     project_id,
     memory_opt_out,
@@ -214,6 +232,17 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
+  const latestQuery = [...messages].reverse().find((message) => message.role === "user")?.text?.trim();
+  if (!latestQuery) {
+    return NextResponse.json({ error: "missing_user_query" }, { status: 400 });
+  }
+  const webCapability = webSearchCapability();
+  if (network_mode === "hybrid" && !webCapability.available) {
+    return NextResponse.json(
+      { error: "hybrid_unavailable", reason: webCapability.reason },
+      { status: 400 },
+    );
+  }
 
   // 客户端断开（关浏览器 / abort()）→ 触发 AbortController，
   // agent-loop / providers 监听后 kill subprocess、停止 fetch 流
@@ -223,6 +252,8 @@ export async function POST(req: NextRequest) {
 
   const stream = new ReadableStream({
     async start(controller) {
+      const runStartedAt = new Date();
+      let finalEnd: Extract<AgentEvent, { kind: "turn-end" }> | null = null;
       let closed = false;
       const safeEnqueue = (chunk: Uint8Array) => {
         if (closed) return;
@@ -237,19 +268,69 @@ export async function POST(req: NextRequest) {
       // executeTool 都会读到 workspace，并在调 web 时带上 kb_workspace cookie。
       await workspaceContext.run(workspace, async () => {
         try {
+          const preparation = await prepareHybridQuery(latestQuery, network_mode);
+          const localCallId = `preflight-local-${Date.now()}`;
+          safeEnqueue(
+            sseLine({
+              kind: "tool-call",
+              id: localCallId,
+              name: "search",
+              args: { query: preparation.query, limit: 5 },
+              synthetic: true,
+            }),
+          );
+          safeEnqueue(
+            sseLine({
+              kind: "tool-result",
+              id: localCallId,
+              name: "search",
+              ok: preparation.local.ok,
+              data: preparation.local.data,
+              error: preparation.local.error,
+              duration_ms: preparation.local.duration_ms,
+              synthetic: true,
+            }),
+          );
+          if (preparation.decision === "web_required") {
+            const webCallId = `preflight-web-${Date.now()}`;
+            safeEnqueue(
+              sseLine({
+                kind: "tool-call",
+                id: webCallId,
+                name: "web_search",
+                args: { query: preparation.query, reason: preparation.reason },
+                synthetic: true,
+              }),
+            );
+            safeEnqueue(
+              sseLine({
+                kind: "tool-result",
+                id: webCallId,
+                name: "web_search",
+                ok: !!preparation.web,
+                data: preparation.web,
+                error: preparation.webError,
+                duration_ms: 0,
+                synthetic: true,
+              }),
+            );
+          }
           const baseSystem = memory_opt_out
             ? `${system || DEFAULT_SYSTEM_PROMPT}\n\n本轮用户明确要求不记录记忆（#no-memory）。不要提出、保存或暗示任何候选记忆。`
             : system || DEFAULT_SYSTEM_PROMPT;
           const indexContent = await getRootIndexContent(workspace);
           const memoryContent = await getConfirmedMemoryContent(workspace);
           const projectContext = await getProjectContext(project_id);
-          const augmentedSystem = appendProjectContext(
-            appendConfirmedMemory(
-              appendPrewarmedIndex(baseSystem, indexContent),
-              memoryContent,
+          const augmentedSystem = appendHybridContext(
+            appendProjectContext(
+              appendConfirmedMemory(
+                appendPrewarmedIndex(baseSystem, indexContent),
+                memoryContent,
+              ),
+              project_id || "",
+              projectContext,
             ),
-            project_id || "",
-            projectContext,
+            preparation,
           );
 
           for await (const evt of runAgent({
@@ -266,18 +347,44 @@ export async function POST(req: NextRequest) {
             signal: abortController.signal,
           })) {
             if (abortController.signal.aborted) break;
+            if (evt.kind === "turn-end") finalEnd = evt;
             safeEnqueue(sseLine(evt));
           }
           safeEnqueue(sseLine({ kind: "stream-end" }));
         } catch (e) {
+          finalEnd = {
+            kind: "turn-end",
+            reason: "error",
+            error_message: e instanceof Error ? e.message : String(e),
+          };
           safeEnqueue(
-            sseLine({
-              kind: "turn-end",
-              reason: "error",
-              error_message: e instanceof Error ? e.message : String(e),
-            }),
+            sseLine(finalEnd),
           );
         } finally {
+          const finishedAt = new Date();
+          try {
+            await appendRunMetric({
+              schema_version: 1,
+              kind: "llm_run",
+              batch_id: process.env.KB_BATCH_ID || null,
+              started_at: runStartedAt.toISOString(),
+              finished_at: finishedAt.toISOString(),
+              duration_ms: finishedAt.getTime() - runStartedAt.getTime(),
+              provider: providerId,
+              model,
+              workspace: workspace ?? null,
+              project_id: project_id ?? null,
+              mode: mode ?? null,
+              network_mode,
+              end_reason: finalEnd?.reason ?? (abortController.signal.aborted ? "aborted" : "unknown"),
+              input_tokens: finalEnd?.usage?.input_tokens ?? null,
+              cached_input_tokens: finalEnd?.usage?.cached_input_tokens ?? null,
+              output_tokens: finalEnd?.usage?.output_tokens ?? null,
+              tool_calls: finalEnd?.usage?.tool_calls ?? null,
+            });
+          } catch (metricError) {
+            console.warn("[metrics] append failed:", metricError);
+          }
           closed = true;
           try {
             controller.close();

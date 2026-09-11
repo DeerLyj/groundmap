@@ -13,6 +13,29 @@ import type { QueryMode } from "@/lib/default-system-prompt";
 import { FlowGraph } from "./FlowGraph";
 import { useT } from "@/lib/i18n-client";
 import type { MemoryCandidate } from "@/lib/memory-candidate";
+import {
+  chatContextKey,
+  conversationMarkdown,
+  downloadMarkdown,
+  loadChatSessions,
+  newChatSessionId,
+  removeChatSession,
+  saveChatSession,
+  toStoredMessages,
+  type ChatSession,
+} from "@/lib/chat-history";
+
+const ACTIVE_CHAT_KEY_PREFIX = "groundmap.debug.active-chat.v1:";
+
+function restoredMessages(session: ChatSession): UIMessage[] {
+  return session.messages.map((message) => ({
+    id: message.id,
+    role: message.role,
+    parts: [{ kind: "text", text: message.text }],
+    usage: message.usage,
+    refValidation: message.refValidation,
+  }));
+}
 
 interface Props {
   provider: string;
@@ -20,6 +43,7 @@ interface Props {
   system: string;
   toolBudget: number;
   mode: QueryMode;
+  networkMode: "local" | "hybrid";
   /** 要查询的 workspace（自动识别得来）；null = 让 web 用默认库 */
   workspace: string | null;
   /** 可选：在本轮请求前预加载的项目 Context Pack */
@@ -52,7 +76,13 @@ type IncomingEvent =
   | {
       kind: "turn-end";
       reason: string;
-      usage?: { input_tokens?: number; output_tokens?: number };
+      usage?: {
+        input_tokens?: number;
+        cached_input_tokens?: number;
+        output_tokens?: number;
+        duration_ms?: number;
+        tool_calls?: number;
+      };
       error_message?: string;
     }
   | { kind: "stream-end" }
@@ -64,6 +94,7 @@ export function ChatPanel({
   system,
   toolBudget,
   mode,
+  networkMode,
   workspace,
   projectId,
   onOpenRef,
@@ -74,12 +105,18 @@ export function ChatPanel({
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [view, setView] = useState<"chat" | "flow">("chat");
+  const [sessionId, setSessionId] = useState("");
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const sessionCreatedAtRef = useRef("");
+  const sessionTitleRef = useRef("");
+  const hydratedContextRef = useRef<string | null>(null);
   // 「黏底」状态：仅当用户已经在底部时，流式增量才自动滚到底；
   // 一旦用户往上滚查看历史，就停止自动滚动，避免被流式输出一直往下拽。
   const stickToBottomRef = useRef(true);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
+  const contextKey = chatContextKey(workspace, projectId);
 
   const latestAssistant =
     [...messages].reverse().find((m) => m.role === "assistant") || null;
@@ -145,6 +182,146 @@ export function ChatPanel({
     },
     [workspace],
   );
+
+  const currentSession = useCallback((source: UIMessage[], includeAll = false): ChatSession | null => {
+    if (!sessionId) return null;
+    const storedMessages = toStoredMessages(source, includeAll ? null : undefined);
+    const firstQuestion = storedMessages.find((message) => message.role === "user")?.text;
+    if (!firstQuestion) return null;
+    const now = new Date().toISOString();
+    const title = sessionTitleRef.current || firstQuestion.replace(/\s+/g, " ").slice(0, 48);
+    sessionTitleRef.current = title;
+    return {
+      schemaVersion: 1,
+      id: sessionId,
+      contextKey,
+      title,
+      createdAt: sessionCreatedAtRef.current || now,
+      updatedAt: now,
+      workspace,
+      projectId,
+      provider,
+      model,
+      mode,
+      networkMode,
+      messages: storedMessages,
+    };
+  }, [contextKey, mode, model, networkMode, projectId, provider, sessionId, workspace]);
+
+  const storeCurrentSession = useCallback((source: UIMessage[]) => {
+    const session = currentSession(source);
+    if (!session) return;
+    try {
+      const all = saveChatSession(window.localStorage, session);
+      window.localStorage.setItem(`${ACTIVE_CHAT_KEY_PREFIX}${contextKey}`, session.id);
+      setSessions(all.filter((item) => item.contextKey === contextKey));
+    } catch {
+      // Browser storage may be disabled or full; chat continues in memory.
+    }
+  }, [contextKey, currentSession]);
+
+  useEffect(() => {
+    hydratedContextRef.current = null;
+    let all: ChatSession[] = [];
+    let active: ChatSession | undefined;
+    try {
+      all = loadChatSessions(window.localStorage);
+      const activeId = window.localStorage.getItem(`${ACTIVE_CHAT_KEY_PREFIX}${contextKey}`);
+      active = all.find((session) => session.contextKey === contextKey && session.id === activeId);
+    } catch {
+      // Browser storage may be unavailable; start an in-memory session.
+    }
+    const nextId = active?.id || newChatSessionId();
+    sessionCreatedAtRef.current = active?.createdAt || new Date().toISOString();
+    sessionTitleRef.current = active?.title || "";
+    setSessionId(nextId);
+    setSessions(all.filter((session) => session.contextKey === contextKey));
+    setMessages(active ? restoredMessages(active) : []);
+    hydratedContextRef.current = contextKey;
+  }, [contextKey]);
+
+  useEffect(() => {
+    if (hydratedContextRef.current !== contextKey || !sessionId) return;
+    const timer = window.setTimeout(() => storeCurrentSession(messages), 400);
+    return () => window.clearTimeout(timer);
+  }, [contextKey, messages, sessionId, storeCurrentSession]);
+
+  useEffect(() => {
+    const saveBeforeClose = () => storeCurrentSession(messages);
+    window.addEventListener("pagehide", saveBeforeClose);
+    return () => window.removeEventListener("pagehide", saveBeforeClose);
+  }, [messages, storeCurrentSession]);
+
+  const openSession = useCallback((id: string) => {
+    if (!id || busy) return;
+    if (id === sessionId) return;
+    storeCurrentSession(messages);
+    let selected: ChatSession | undefined;
+    try {
+      selected = loadChatSessions(window.localStorage).find(
+        (session) => session.contextKey === contextKey && session.id === id,
+      );
+    } catch {
+      return;
+    }
+    if (!selected) return;
+    sessionCreatedAtRef.current = selected.createdAt;
+    sessionTitleRef.current = selected.title;
+    setSessionId(selected.id);
+    setMessages(restoredMessages(selected));
+    try {
+      window.localStorage.setItem(`${ACTIVE_CHAT_KEY_PREFIX}${contextKey}`, selected.id);
+    } catch {
+      // The selected history remains open in memory.
+    }
+    setView("chat");
+  }, [busy, contextKey, messages, sessionId, storeCurrentSession]);
+
+  const newSession = useCallback(() => {
+    if (busy) return;
+    storeCurrentSession(messages);
+    const id = newChatSessionId();
+    sessionCreatedAtRef.current = new Date().toISOString();
+    sessionTitleRef.current = "";
+    setSessionId(id);
+    setMessages([]);
+    try {
+      window.localStorage.setItem(`${ACTIVE_CHAT_KEY_PREFIX}${contextKey}`, id);
+    } catch {
+      // The new chat remains available in memory.
+    }
+    setView("chat");
+  }, [busy, contextKey, messages, storeCurrentSession]);
+
+  const clearSession = useCallback(() => {
+    if (busy) return;
+    try {
+      const all = removeChatSession(window.localStorage, sessionId);
+      setSessions(all.filter((session) => session.contextKey === contextKey));
+    } catch {
+      // Clearing the visible in-memory chat still succeeds.
+    }
+    const id = newChatSessionId();
+    sessionCreatedAtRef.current = new Date().toISOString();
+    sessionTitleRef.current = "";
+    setSessionId(id);
+    setMessages([]);
+    try {
+      window.localStorage.setItem(`${ACTIVE_CHAT_KEY_PREFIX}${contextKey}`, id);
+    } catch {
+      // The cleared chat remains empty in memory.
+    }
+    setView("chat");
+  }, [busy, contextKey, sessionId]);
+
+  const downloadConversation = useCallback(() => {
+    const session = currentSession(messages, true);
+    if (!session) return;
+    downloadMarkdown(
+      `groundmap-chat-${session.createdAt.slice(0, 19).replace(/[T:]/g, "-")}.md`,
+      conversationMarkdown(session),
+    );
+  }, [currentSession, messages]);
 
   const applyEvent = useCallback((assistantId: string, evt: IncomingEvent) => {
     setMessages((prev) => {
@@ -218,6 +395,7 @@ export function ChatPanel({
       } else if (evt.kind === "turn-end") {
         msg.end_reason = evt.reason;
         msg.end_error = evt.error_message;
+        msg.usage = evt.usage;
         if (evt.reason === "stop") msg.status = undefined;
       } else if (evt.kind === "stream-end") {
         msg.streaming = false;
@@ -271,7 +449,8 @@ export function ChatPanel({
             .map((p) => (p as { text: string }).text)
             .join(""),
         }))
-        .filter((m) => m.text),
+        .filter((m) => m.text)
+        .slice(-49),
       { role: "user" as const, text },
     ];
 
@@ -288,6 +467,7 @@ export function ChatPanel({
           messages: apiMessages,
           tool_budget: toolBudget,
           mode,
+          network_mode: networkMode,
           workspace: workspace || undefined,
           project_id: projectId || undefined,
           memory_opt_out: text.includes("#no-memory"),
@@ -364,6 +544,7 @@ export function ChatPanel({
     system,
     toolBudget,
     mode,
+    networkMode,
     workspace,
     projectId,
   ]);
@@ -385,7 +566,7 @@ export function ChatPanel({
   return (
     <div className="flex h-full flex-col">
       {/* ─── 视图切换 tab：印刷感方块 ─── */}
-      <div className="flex items-stretch border-b border-[var(--line)]">
+      <div className="flex flex-wrap items-stretch border-b border-[var(--line)]">
         <button
           onClick={() => setView("chat")}
           className={`relative px-5 py-2.5 text-[11px] uppercase tracking-[0.16em] transition-colors ${
@@ -411,7 +592,7 @@ export function ChatPanel({
             <span className="ml-2 inline-block h-1.5 w-1.5 rounded-full bg-[var(--amber)] align-middle shadow-[0_0_6px_var(--amber)]" />
           )}
         </button>
-        <div className="ml-auto flex items-center gap-4 px-5 text-[10.5px] uppercase tracking-[0.18em] text-[var(--paper-mute)]">
+        <div className="ml-auto flex items-center gap-3 px-5 text-[10.5px] uppercase tracking-[0.18em] text-[var(--paper-mute)]">
           {view === "flow" ? (
             <span>
               {latestAssistant
@@ -425,6 +606,34 @@ export function ChatPanel({
           ) : (
             <span>{t("chat.turns", { n: userCount })}</span>
           )}
+          <select
+            value=""
+            onChange={(event) => openSession(event.target.value)}
+            disabled={busy || sessions.length === 0}
+            className="max-w-56 border border-[var(--line)] bg-[var(--ink-2)] px-2 py-1 normal-case tracking-normal text-[var(--paper-dim)] disabled:opacity-40"
+            aria-label={t("chat.history", { n: sessions.length })}
+          >
+            <option value="">{t("chat.history", { n: sessions.length })}</option>
+            {sessions.map((session) => (
+              <option key={session.id} value={session.id}>
+                {session.updatedAt.slice(0, 16).replace("T", " ")} · {session.title}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={newSession}
+            disabled={busy}
+            className="hover:text-[var(--amber)] disabled:opacity-40"
+          >
+            {t("chat.new")}
+          </button>
+          <button
+            onClick={downloadConversation}
+            disabled={busy || messages.length === 0}
+            className="hover:text-[var(--amber)] disabled:opacity-40"
+          >
+            {t("chat.download_md")}
+          </button>
         </div>
       </div>
 
@@ -512,7 +721,7 @@ export function ChatPanel({
             {t("chat.send_hint")}
           </span>
           <button
-            onClick={() => setMessages([])}
+            onClick={clearSession}
             disabled={busy}
             className="ml-auto text-[10.5px] uppercase tracking-[0.18em] text-[var(--paper-mute)] hover:text-[var(--vermilion)] disabled:opacity-40"
           >

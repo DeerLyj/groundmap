@@ -4,6 +4,7 @@ import { runKCli } from "@/lib/k-cli";
 import { getServerLocale } from "@/lib/server-locale";
 import { t } from "@/lib/i18n";
 import { ProjectConfirmButton } from "./ProjectConfirmButton";
+import { DeliverableConfirmButton } from "./DeliverableConfirmButton";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +14,8 @@ interface ProjectSummary {
   updated_at: string;
   next_action: string;
   decision_count: number;
+  execution_count: number;
+  control_loop?: { complete: boolean } | null;
   valid: boolean;
   errors: string[];
 }
@@ -28,6 +31,32 @@ interface ProjectDetail {
     frontmatter: Record<string, unknown>;
     content: string;
   }>;
+  executions: Array<{
+    execution_id: string;
+    title: string;
+    recorded_at: string;
+    confirmed: boolean;
+    content: string;
+  }>;
+  control_loop: {
+    complete: boolean;
+    missing: string[];
+  };
+}
+
+interface DeliverableVersion {
+  path: string;
+  title: string;
+  deliverable_id: string;
+  kind: string;
+  project_id: string;
+  version: number;
+  status: string;
+  reviewed: boolean;
+  source_refs: string[];
+  content: string;
+  valid: boolean;
+  errors: string[];
 }
 
 function isProjectId(value: string | undefined): value is string {
@@ -53,8 +82,18 @@ export default async function ProjectsPage({
         "--no-write",
       ])
     : null;
+  const deliverablesResult = selectedId
+    ? await runKCli<DeliverableVersion[]>([
+        "deliverable-list",
+        "--project-id",
+        selectedId,
+      ])
+    : null;
   const detail = detailResult?.ok ? detailResult.data : null;
   const context = contextResult?.ok ? contextResult.data : null;
+  const deliverables = deliverablesResult?.ok && Array.isArray(deliverablesResult.data)
+    ? deliverablesResult.data
+    : [];
 
   return (
     <main className="w-full overflow-auto p-6">
@@ -82,6 +121,13 @@ export default async function ProjectsPage({
                   {t("projects.status", locale, { status: project.status || "—" })}
                   {" · "}
                   {t("projects.decisions", locale, { n: project.decision_count })}
+                  {" · "}
+                  {t("projects.executions", locale, { n: project.execution_count })}
+                </div>
+                <div className="mt-1 text-xs">
+                  {project.control_loop?.complete
+                    ? t("projects.control_complete", locale)
+                    : t("projects.control_incomplete", locale)}
                 </div>
               </Link>
             ))}
@@ -122,6 +168,99 @@ export default async function ProjectsPage({
               {detail.brief && <PageRenderer content={detail.brief.content} />}
               <div className="mt-6 border-t pt-5">
                 <PageRenderer content={detail.state.content} />
+              </div>
+              <div className="mt-6 border-t pt-5">
+                <h3 className="font-medium">
+                  {t("projects.deliverables", locale, { n: deliverables.length })}
+                </h3>
+                {deliverables.length === 0 ? (
+                  <p className="mt-3 text-sm text-muted-foreground">
+                    {t("projects.no_deliverables", locale)}
+                  </p>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {deliverables.map((deliverable) => (
+                      <details key={deliverable.path} className="rounded border p-3">
+                        <summary className="cursor-pointer">
+                          <span className="font-medium">{deliverable.title}</span>
+                          <span className="ml-2 text-xs text-muted-foreground">
+                            v{String(deliverable.version).padStart(3, "0")}
+                            {" · "}
+                            {deliverable.kind}
+                            {" · "}
+                            {deliverable.reviewed
+                              ? t("projects.deliverable_reviewed", locale)
+                              : t("projects.deliverable_draft", locale)}
+                          </span>
+                        </summary>
+                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                          <span>
+                            {t("projects.deliverable_sources", locale, {
+                              n: deliverable.source_refs.length,
+                            })}
+                          </span>
+                          {!deliverable.reviewed && deliverable.valid && (
+                            <DeliverableConfirmButton
+                              projectId={detail.project.project_id}
+                              deliverableId={deliverable.deliverable_id}
+                              version={deliverable.version}
+                            />
+                          )}
+                        </div>
+                        {deliverable.errors.map((error) => (
+                          <p key={error} className="mt-2 text-xs text-destructive">{error}</p>
+                        ))}
+                        <div className="mt-3 border-t pt-3">
+                          <PageRenderer content={deliverable.content} sourcePath={deliverable.path} />
+                        </div>
+                      </details>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="mt-6 border-t pt-5">
+                <h3 className="font-medium">
+                  {t("projects.executions", locale, { n: detail.executions.length })}
+                </h3>
+                {detail.executions.length === 0 ? (
+                  <p className="mt-3 text-sm text-muted-foreground">
+                    {t("projects.no_executions", locale)}
+                  </p>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {detail.executions.map((execution) => (
+                      <article key={execution.execution_id} className="rounded border p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-medium">{execution.title}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {execution.recorded_at}
+                            {" · "}
+                            {execution.confirmed
+                              ? t("projects.execution_confirmed", locale)
+                              : t("projects.execution_pending", locale)}
+                            {!execution.confirmed && (
+                              <span className="ml-2">
+                                <ProjectConfirmButton
+                                  projectId={detail.project.project_id}
+                                  target="execution"
+                                  executionId={execution.execution_id}
+                                />
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                        <div className="mt-3">
+                          <PageRenderer content={execution.content} />
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+                <p className="mt-3 text-xs">
+                  {detail.control_loop.complete
+                    ? t("projects.control_complete", locale)
+                    : t("projects.control_incomplete", locale)}
+                </p>
               </div>
               <div className="mt-6 border-t pt-5">
                 <h3 className="font-medium">{t("projects.decisions", locale, { n: detail.decisions.length })}</h3>

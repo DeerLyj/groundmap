@@ -19,6 +19,11 @@ export default function Page() {
   const t = useT();
   const [provider, setProvider] = useState("claude-code");
   const [model, setModel] = useState("default");
+  const [networkMode, setNetworkMode] = useState<"local" | "hybrid">("local");
+  const [hybridCapability, setHybridCapability] = useState<{
+    available: boolean;
+    reason?: string;
+  }>({ available: false });
   const [mode, setMode] = useState<QueryMode>("quick");
   const [system, setSystem] = useState(buildSystemPrompt("quick"));
   const [systemDirty, setSystemDirty] = useState(false);
@@ -36,6 +41,10 @@ export default function Page() {
   const [workspace, setWorkspace] = useState<string | null>(null);
   const [projects, setProjects] = useState<Array<{ project_id: string; status?: string }>>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
+  const knowledgeBaseUrl = (
+    process.env.NEXT_PUBLIC_KB_URL || "http://127.0.0.1:3006"
+  ).replace(/\/$/, "");
+  const knowledgeHref = `${knowledgeBaseUrl}/?ws=${encodeURIComponent(workspace || "")}`;
 
   const openRef = (r: WikiRef) => {
     setPreviewNode(null);
@@ -157,7 +166,50 @@ export default function Page() {
                 setProvider(p);
                 setModel(m);
               }}
+              onCapabilitiesChange={(capabilities) => {
+                setHybridCapability({
+                  available: capabilities.hybrid_qa,
+                  reason: capabilities.hybrid_reason,
+                });
+                if (!capabilities.hybrid_qa) setNetworkMode("local");
+              }}
             />
+            <div className="flex flex-col gap-1">
+              <span className="k-eyebrow">{t("picker.network")}</span>
+              <div
+                className="flex min-h-8 items-center border border-[var(--line)]"
+                role="group"
+                aria-label={t("picker.network")}
+              >
+                <button
+                  type="button"
+                  aria-pressed={networkMode === "local"}
+                  onClick={() => setNetworkMode("local")}
+                  className={`px-2 py-1 text-[11px] font-mono transition-colors ${
+                    networkMode === "local"
+                      ? "bg-[var(--amber)] text-[var(--ink)]"
+                      : "text-[var(--paper-mute)] hover:text-[var(--paper)]"
+                  }`}
+                >
+                  {t("picker.network_local")}
+                </button>
+                <span className="text-[var(--line-2)]">·</span>
+                <button
+                  type="button"
+                  aria-pressed={networkMode === "hybrid"}
+                  disabled={!hybridCapability.available}
+                  title={hybridCapability.reason}
+                  onClick={() => setNetworkMode("hybrid")}
+                  className={`px-2 py-1 text-[11px] font-mono transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                    networkMode === "hybrid"
+                      ? "bg-[var(--amber)] text-[var(--ink)]"
+                      : "text-[var(--paper-mute)] hover:text-[var(--paper)]"
+                  }`}
+                >
+                  {t("picker.network_hybrid")}
+                </button>
+              </div>
+            </div>
             <ModePicker mode={mode} onChange={setMode} />
             <div className="flex flex-col gap-1">
               <span className="k-eyebrow">{t("header.budget")}</span>
@@ -191,6 +243,20 @@ export default function Page() {
             >
               {showSystem ? "▼ prompt" : "▸ prompt"}
             </button>
+            <a
+              href={knowledgeHref}
+              target="_blank"
+              rel="noreferrer"
+              className="k-btn"
+              title={t("header.open_kb_tip")}
+              onClick={() => {
+                if (workspace) {
+                  document.cookie = `kb_workspace=${workspace}; path=/; max-age=${60 * 60 * 24 * 365}; SameSite=Lax`;
+                }
+              }}
+            >
+              {t("header.open_kb")} ↗
+            </a>
             <LocaleSwitcher />
           </div>
         </div>
@@ -255,6 +321,7 @@ export default function Page() {
             system={system}
             toolBudget={toolBudget}
             mode={mode}
+            networkMode={networkMode}
             workspace={workspace}
             projectId={projectId}
             onOpenRef={openRef}

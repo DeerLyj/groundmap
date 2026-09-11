@@ -77,7 +77,7 @@ export default async function PageView({ params, searchParams }: PageProps) {
           </div>
         )}
         <Separator className="mb-4" />
-        <PageRenderer content={stripLeadingH1(content)} />
+        <PageRenderer content={stripLeadingH1(content)} sourcePath={relPath} />
       </div>
     );
   }

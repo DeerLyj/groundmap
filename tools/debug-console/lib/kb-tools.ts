@@ -211,7 +211,7 @@ export const KB_TOOLS: KbTool[] = [
     input_schema: {
       type: "object",
       properties: {
-        project_id: { type: "string", description: "项目 ID，如 china-bangladesh-ground-station" },
+        project_id: { type: "string", description: "项目 ID，如 starlight-rooftop-greenhouse" },
       },
       required: ["project_id"],
     },

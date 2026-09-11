@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-img-element -- Markdown may contain external or private evidence URLs. */
 "use client";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -10,9 +11,16 @@ import {
   buildAnchorRegistry,
 } from "@/lib/anchor-refs";
 import { WikiLink } from "@/components/WikiLink";
+import {
+  assetUrl,
+  evidenceHref,
+  resolveMarkdownAssetPath,
+} from "@/lib/evidence-path";
 
 interface PageRendererProps {
   content: string;
+  /** Workspace-relative path of this Markdown file, used to resolve local images. */
+  sourcePath?: string;
 }
 
 // 提到模块级：避免每次 render 新建引用，让 react-markdown 内部 memoization 生效，
@@ -133,12 +141,30 @@ const COMPONENTS: Components = {
  * - 普通链接照常渲染（外部链接加 target=_blank）
  * - trailing anchor + raw wikilink 渲染为 [n] 上标 + 文末 References 区（论文样式，见 lib/anchor-refs.tsx）
  */
-export function PageRenderer({ content }: PageRendererProps) {
+export function PageRenderer({ content, sourcePath }: PageRendererProps) {
   const processed = preprocessWikiLinks(content);
   const { registry, refs } = useMemo(
     () => buildAnchorRegistry(content, { scanWikilinks: true }),
     [content],
   );
+  const components = useMemo<Components>(() => ({
+    ...COMPONENTS,
+    img({ src, alt, ...props }) {
+      const localPath = resolveMarkdownAssetPath(sourcePath, src);
+      if (!localPath) return <img src={src} alt={alt || ""} loading="lazy" {...props} />;
+      return (
+        <a href={evidenceHref(localPath)} className="block" title={alt || localPath}>
+          <img
+            src={assetUrl(localPath)}
+            alt={alt || localPath.split("/").at(-1) || ""}
+            loading="lazy"
+            className="max-w-full rounded-md border bg-white object-contain"
+            {...props}
+          />
+        </a>
+      );
+    },
+  }), [sourcePath]);
 
   return (
     <article
@@ -157,7 +183,7 @@ export function PageRenderer({ content }: PageRendererProps) {
         <ReactMarkdown
           remarkPlugins={REMARK_PLUGINS}
           urlTransform={URL_TRANSFORM}
-          components={COMPONENTS}
+          components={components}
         >
           {processed}
         </ReactMarkdown>

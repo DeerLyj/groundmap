@@ -40,6 +40,8 @@ export const TRANSLATIONS = {
     "header.budget": "预算",
     "header.budget_reset": "恢复跟随模式的默认预算",
     "header.edit_prompt": "编辑 system prompt",
+    "header.open_kb": "知识库",
+    "header.open_kb_tip": "在新标签页打开当前知识库",
     "header.bar_kb": "知识库 · markdown + git",
     "header.bar_llm": "LLM 推理 + 工具调用 · 实时追踪",
     "header.bar_opensource": "开源",
@@ -60,6 +62,9 @@ export const TRANSLATIONS = {
     "picker.project": "项目",
     "picker.project_none": "不预加载项目",
     "picker.project_tip": "可选：把项目 Context Pack 预加载到下一轮对话",
+    "picker.network": "搜索模式",
+    "picker.network_local": "仅本地",
+    "picker.network_hybrid": "联网搜索",
 
     // ── 查询深度模式说明 ──
     "mode.quick.desc": "单点事实 / 定义 / 时间问 — 5-10 步快速答",
@@ -81,6 +86,9 @@ export const TRANSLATIONS = {
     "chat.abort": "✕ 中止",
     "chat.send_hint": "⌘ + enter 发送",
     "chat.clear": "清空记录 ⌫",
+    "chat.history": "历史会话 · {n}",
+    "chat.new": "新建对话 +",
+    "chat.download_md": "下载会话 .md",
     "chat.jump_to_latest": "↓ 回到最新",
     "memory.candidate_title": "AI 提出的候选记忆（待确认）",
     "memory.scope": "适用范围：{scope}",
@@ -128,6 +136,8 @@ export const TRANSLATIONS = {
     "msg.downgraded_desc":
       "这些块锚点的内容不支撑对应论断，已自动降级为整页链接（去掉假精度）。",
     "msg.end": "⚠ 结束 · {reason}",
+    "msg.usage": "用量 · 输入 {input}（缓存 {cached}）· 输出 {output} tokens · {seconds}s · 工具 {tools}",
+    "msg.download_md": "下载 .md",
 
     // ── 失效引用行内标记（wiki-ref）──
     "ref.no_source": "当前库无此来源",
@@ -272,6 +282,8 @@ export const TRANSLATIONS = {
     "header.budget": "budget",
     "header.budget_reset": "Reset to mode default budget",
     "header.edit_prompt": "Edit system prompt",
+    "header.open_kb": "Knowledge base",
+    "header.open_kb_tip": "Open the current knowledge base in a new tab",
     "header.bar_kb": "knowledge base · markdown + git",
     "header.bar_llm": "llm reasoning + tool calls · live trace",
     "header.bar_opensource": "open-source",
@@ -292,6 +304,9 @@ export const TRANSLATIONS = {
     "picker.project": "project",
     "picker.project_none": "no project preload",
     "picker.project_tip": "Optional: preload a project's Context Pack into the next chat turn",
+    "picker.network": "search mode",
+    "picker.network_local": "Local only",
+    "picker.network_hybrid": "Web search",
 
     // ── Query depth modes ──
     "mode.quick.desc":
@@ -315,6 +330,9 @@ export const TRANSLATIONS = {
     "chat.abort": "✕ abort",
     "chat.send_hint": "⌘ + enter to send",
     "chat.clear": "clear log ⌫",
+    "chat.history": "history · {n}",
+    "chat.new": "new chat +",
+    "chat.download_md": "download chat .md",
     "chat.jump_to_latest": "↓ jump to latest",
     "memory.candidate_title": "AI memory candidate (needs review)",
     "memory.scope": "Scope: {scope}",
@@ -363,6 +381,8 @@ export const TRANSLATIONS = {
     "msg.downgraded_desc":
       "The content at these block anchors doesn't support the corresponding claim, so they've been automatically downgraded to whole-page links (removing the false precision).",
     "msg.end": "⚠ end · {reason}",
+    "msg.usage": "usage · input {input} (cached {cached}) · output {output} tokens · {seconds}s · tools {tools}",
+    "msg.download_md": "download .md",
 
     // ── Broken-ref inline marker (wiki-ref) ──
     "ref.no_source": "no such source in this base",

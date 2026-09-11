@@ -205,6 +205,10 @@ export function parseWikilinks(content: string): WikiLink[] {
 /** 标准化链接目标：补 .md 后缀 */
 export function normalizeLinkTarget(target: string): string {
   const trimmed = target.trim();
+  // Explicit source/media extensions must remain intact for the evidence viewer.
+  if (/\.(?:md|pdf|docx|pptx|xlsx|png|jpe?g|gif|webp|bmp|mp3|wav|m4a|ogg|flac|mp4|webm)$/i.test(trimmed)) {
+    return trimmed;
+  }
   if (!trimmed.endsWith(".md")) return trimmed + ".md";
   return trimmed;
 }

@@ -6,9 +6,10 @@ import { useT } from "@/lib/i18n-client";
 
 interface Props {
   projectId: string;
-  target: "state" | "decision";
+  target: "state" | "decision" | "execution";
   decisionId?: string;
   decisionStatus?: string;
+  executionId?: string;
 }
 
 export function ProjectConfirmButton({
@@ -16,6 +17,7 @@ export function ProjectConfirmButton({
   target,
   decisionId,
   decisionStatus,
+  executionId,
 }: Props) {
   const t = useT();
   const router = useRouter();
@@ -34,6 +36,7 @@ export function ProjectConfirmButton({
           target,
           decision_id: decisionId,
           decision_status: decisionStatus,
+          execution_id: executionId,
         }),
       });
       if (!response.ok) throw new Error("confirm_failed");

@@ -21,6 +21,7 @@ import {
 import type { Components } from "react-markdown";
 import { extractTrailingAnchor, extractCodeBlockAnchor } from "./markdown-render";
 import { useT, useSelfRefs } from "./i18n-client";
+import { evidenceHref } from "./evidence-path";
 
 /**
  * 每行末尾的 trailing anchor —— 与 markdown-render.ts 的 TRAILING_ANCHOR_RE
@@ -438,7 +439,7 @@ function ReferenceItem({ item }: { item: AnchorRef }) {
       <KindBadge kind={item.kind} />
       {item.kind === "raw" ? (
         <a
-          href={`/page/${item.target}.md${item.anchor ? `#${encodeURIComponent(item.anchor)}` : ""}`}
+          href={evidenceHref(`${item.target}.md`, item.anchor)}
           className="font-mono text-xs text-amber-600 dark:text-amber-400 hover:underline shrink-0 truncate"
           title={t("references.jump_to_section")}
         >

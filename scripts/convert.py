@@ -53,6 +53,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1131,6 +1132,19 @@ def parse_extensions(ext_str: str) -> set[str]:
     return exts
 
 
+def _write_run_report(path: str | None, report: dict) -> None:
+    """Write one machine-readable conversion run report when explicitly requested."""
+    if not path:
+        return
+    target = Path(path).expanduser().resolve()
+    base = (_BASE_ROOT or get_project_root()).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"验收报告必须写在当前数据工作区内: {target}") from exc
+    _atomic_write_text(target, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="将 raw/ 目录中的文档批量转换为 Markdown（基于 markitdown）"
@@ -1166,7 +1180,21 @@ def main():
         default=None,
         help="只处理指定格式，逗号分隔（如 --ext .pdf,.docx）",
     )
+    parser.add_argument(
+        "--report",
+        type=str,
+        default=None,
+        help="把本次转换的耗时、文件数和质量结果写入 JSON（用于真实验收）",
+    )
+    parser.add_argument(
+        "--batch-id",
+        type=str,
+        default=None,
+        help="验收批次标识，用于把转换报告与模型用量账本合并",
+    )
     args = parser.parse_args()
+    started_at = datetime.now(timezone.utc)
+    started_clock = time.perf_counter()
 
     # 确定扫描目录 + doc_path 基准
     global _BASE_ROOT, _SOURCE_ROOT, _DERIVED_ROOT
@@ -1232,6 +1260,22 @@ def main():
     files = collect_files(scan_dir, extensions)
     if not files:
         print(f"未找到待转换的文件（目录: {scan_dir}）")
+        _write_run_report(
+            args.report,
+            {
+                "schema_version": 1,
+                "kind": "conversion",
+                "batch_id": args.batch_id,
+                "started_at": started_at.isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "duration_ms": round((time.perf_counter() - started_clock) * 1000),
+                "workspace": None if args.dir else args.workspace,
+                "parameters": {"force": args.force, "extensions": sorted(extensions or [])},
+                "totals": {"discovered": 0, "attempted": 0, "converted": 0, "quality_success": 0, "degraded": 0, "failed": 0, "skipped_uptodate": 0},
+                "files": [],
+                "cloud_llm_calls": 0,
+            },
+        )
         return
 
     # 筛选需要转换的文件
@@ -1252,6 +1296,22 @@ def main():
             for f in to_convert:
                 rel = f.relative_to(scan_dir)
                 print(f"  {rel}")
+        _write_run_report(
+            args.report,
+            {
+                "schema_version": 1,
+                "kind": "conversion_dry_run",
+                "batch_id": args.batch_id,
+                "started_at": started_at.isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "duration_ms": round((time.perf_counter() - started_clock) * 1000),
+                "workspace": None if args.dir else args.workspace,
+                "parameters": {"force": args.force, "extensions": sorted(extensions or [])},
+                "totals": {"discovered": len(files), "attempted": 0, "pending": len(to_convert), "skipped_uptodate": skipped_uptodate},
+                "files": [],
+                "cloud_llm_calls": 0,
+            },
+        )
         return
 
     # 执行转换
@@ -1260,27 +1320,62 @@ def main():
 
     if not to_convert:
         print("所有文件均已是最新，无需转换。")
+        _write_run_report(
+            args.report,
+            {
+                "schema_version": 1,
+                "kind": "conversion",
+                "batch_id": args.batch_id,
+                "started_at": started_at.isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "duration_ms": round((time.perf_counter() - started_clock) * 1000),
+                "workspace": None if args.dir else args.workspace,
+                "parameters": {"force": args.force, "extensions": sorted(extensions or [])},
+                "totals": {"discovered": len(files), "attempted": 0, "converted": 0, "quality_success": 0, "degraded": 0, "failed": 0, "skipped_uptodate": skipped_uptodate},
+                "files": [],
+                "cloud_llm_calls": 0,
+            },
+        )
         return
 
     md = MarkItDown()
     success_count = 0
     fail_count = 0
     empty_count = 0
+    degraded_count = 0
+    file_results = []
 
     for f in to_convert:
         rel = f.relative_to(scan_dir)
+        file_started = time.perf_counter()
         print(f"  转换: {rel} ... ", end="", flush=True)
         try:
             ok, msg = convert_file(md, f)
             if ok:
                 print(f"完成 {msg}")
                 success_count += 1
+                quality_path, _, _ = _artifact_paths(_target_paths(f)[0])
+                quality = json.loads(quality_path.read_text(encoding="utf-8"))
+                status = str(quality.get("status", "success"))
+                degraded_count += int(status == "degraded")
+                file_results.append(
+                    {
+                        "path": rel.as_posix(),
+                        "bytes": f.stat().st_size,
+                        "duration_ms": round((time.perf_counter() - file_started) * 1000),
+                        "status": status,
+                        "characters": quality.get("character_count"),
+                        "issues": quality.get("issues", []),
+                    }
+                )
             else:
                 print(f"跳过 ({msg})")
                 empty_count += 1
+                file_results.append({"path": rel.as_posix(), "bytes": f.stat().st_size, "duration_ms": round((time.perf_counter() - file_started) * 1000), "status": "empty", "error": msg})
         except Exception as e:
             print(f"失败 ({e})")
             fail_count += 1
+            file_results.append({"path": rel.as_posix(), "bytes": f.stat().st_size, "duration_ms": round((time.perf_counter() - file_started) * 1000), "status": "failed", "error": str(e)})
 
     # 汇总报告
     print(f"\n{'='*40}")
@@ -1292,6 +1387,33 @@ def main():
         print(f"  失败: {fail_count}")
     if skipped_uptodate:
         print(f"  已是最新: {skipped_uptodate}")
+
+    _write_run_report(
+        args.report,
+        {
+            "schema_version": 1,
+            "kind": "conversion",
+            "batch_id": args.batch_id,
+            "started_at": started_at.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "duration_ms": round((time.perf_counter() - started_clock) * 1000),
+            "workspace": None if args.dir else args.workspace,
+            "parameters": {"force": args.force, "extensions": sorted(extensions or [])},
+            "totals": {
+                "discovered": len(files),
+                "attempted": len(to_convert),
+                "converted": success_count,
+                "quality_success": success_count - degraded_count,
+                "degraded": degraded_count,
+                "empty": empty_count,
+                "failed": fail_count,
+                "skipped_uptodate": skipped_uptodate,
+                "input_bytes": sum(f.stat().st_size for f in to_convert),
+            },
+            "files": file_results,
+            "cloud_llm_calls": 0,
+        },
+    )
 
     # 推荐下一步：ingest 流程的章节阅读 + 回填摘要
     if success_count > 0:
